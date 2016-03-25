@@ -11,61 +11,15 @@
 #include "taskq.h"
 #include "miniutils.h"
 #include "gpio.h"
-#include "ws2812b_spi_stm32f1.h"
 #include "linker_symaccess.h"
 #include "wdog.h"
 #include "rtc.h"
-#include "sensor.h"
-#include "lamp.h"
 #include <stdarg.h>
 
 static volatile u8_t cpu_claims;
 static u8_t cli_buf[16];
 volatile bool cli_rd;
 static task_timer heartbeat_timer;
-static task_timer temp_timer;
-static task *temp_task;
-static u64_t sensor_idle_tick = 0;
-#ifdef DETECT_UART
-static task_timer cli_tmo_timer;
-static task *cli_tmo_task;
-static bool was_uart_connected = FALSE;
-static u64_t cli_tmo_last_time = 0;
-static bool cli_claimed = FALSE;
-#endif
-
-#ifdef DETECT_UART
-static void app_cli_claim(void) {
-  APP_claim(CLAIM_CLI);
-  cli_claimed = TRUE;
-  TASK_start_timer(cli_tmo_task, &cli_tmo_timer, 0, 0, 0, APP_CLI_POLL_MS, "cli");
-  cli_tmo_last_time = RTC_get_tick();
-}
-
-static void app_cli_release(void) {
-  APP_release(CLAIM_CLI);
-  TASK_stop_timer(&cli_tmo_timer);
-  cli_claimed = FALSE;
-}
-
-static bool app_detect_uart(void) {
-  gpio_config(PORTA, PIN3, CLK_50MHZ, IN, AF0, OPENDRAIN, PULLDOWN);
-  SYS_hardsleep_ms(2); // wait for pin to stabilize
-  bool res = gpio_get(PORTA, PIN3);
-  // reset to uart config
-  gpio_config(PORTA, PIN3, CLK_50MHZ, IN, AF0, OPENDRAIN, NOPULL);
-  return res;
-}
-
-static void cli_tmo(u32_t a, void *p) {
-  if (cli_claimed) {
-    u64_t tick_now = RTC_get_tick();
-    if (tick_now - cli_tmo_last_time > RTC_S_TO_TICK(APP_CLI_INACT_SHUTDOWN_S)) {
-      app_cli_release();
-    }
-  }
-}
-#endif
 
 static void cli_task_on_input(u32_t len, void *p) {
   u8_t io = (u8_t)((u32_t)p);
@@ -74,9 +28,6 @@ static void cli_task_on_input(u32_t len, void *p) {
     cli_recv((char *)cli_buf, rlen);
   }
   cli_rd = FALSE;
-#ifdef DETECT_UART
-  cli_tmo_last_time = RTC_get_tick();
-#endif
 }
 
 
@@ -89,24 +40,7 @@ static void cli_rx_avail_irq(u8_t io, void *arg, u16_t available) {
 }
 
 static void heartbeat(u32_t ignore, void *ignore_more) {
-  gpio_disable(PIN_LED);
-
   WDOG_feed();
-
-#ifdef DETECT_UART
-  bool is_uart_connected = app_detect_uart();
-  if (is_uart_connected && !was_uart_connected && !cli_claimed) {
-    DBG(D_APP, D_DEBUG, "UART reconnected\n");
-    app_cli_claim();
-  }
-  was_uart_connected = is_uart_connected;
-#endif
-
-  gpio_enable(PIN_LED);
-}
-
-static void read_temp(u32_t ignore, void *ignore_more) {
-  SENS_read_temp();
 }
 
 static void sleep_stop_restore(void)
@@ -237,35 +171,15 @@ void APP_init(void) {
   if (RCC_GetFlagStatus(RCC_FLAG_WWDGRST) == SET) print("WWDG\n");
   RCC_ClearFlag();
 
-
-  gpio_enable(PIN_LED);
-
   cpu_claims = 0;
 
   task *heatbeat_task = TASK_create(heartbeat, TASK_STATIC);
   TASK_start_timer(heatbeat_task, &heartbeat_timer, 0, 0, 0, APP_HEARTBEAT_MS, "heartbeat");
 
-  temp_task = TASK_create(read_temp, TASK_STATIC);
-  TASK_start_timer(temp_task, &temp_timer, 0, 0, 1000, APP_TEMPERATURE_MS, "temp");
-
-#ifdef DETECT_UART
-  cli_tmo_task = TASK_create(cli_tmo, TASK_STATIC);
-  if (app_detect_uart()) {
-    app_cli_claim();
-  } else {
-    cli_tmo_last_time = 0;
-  }
-#endif
-
   cli_rd = FALSE;
   IO_set_callback(IOSTD, cli_rx_avail_irq, NULL);
 
-  SENS_init();
-  SENS_enter_active();
-
-  LAMP_init();
-
-  WB_init();
+  APP_claim(0);
 
   app_spin();
 }
@@ -294,57 +208,6 @@ void APP_release(u8_t resource) {
   irq_enable();
 }
 
-void APP_report_activity(bool activity, bool inactivity, bool tap, bool doubletap, bool issleep) {
-  if (issleep) {
-    SENS_enter_idle();
-  } else if (activity || tap || doubletap) {
-    SENS_enter_active();
-    sensor_idle_tick = RTC_get_tick();
-  }
-
-  if ((tap || doubletap)) {
-    LAMP_enable(!LAMP_on());
-    sensor_idle_tick = RTC_get_tick();
-  }
-}
-
-void APP_report_temperature(float temp) {
-  print("temperature %.2f°C\n", temp);
-}
-
-void APP_report_data(
-    s16_t ax, s16_t ay, s16_t az,
-    s16_t mx, s16_t my, s16_t mz,
-    s16_t gx, s16_t gy, s16_t gz) {
-  if (LAMP_on()) {
-    ax += 12; ay += 12;
-    int scyc = ax < 0 ? -1 : 1;
-    int slig = ay < 0 ? -1 : 1;
-    int dcyc = ABS(ax);
-    int dlig = ABS(ay);
-    if (dcyc > 20) {
-      dcyc -= 20;
-      dcyc = 1 + MIN(64, dcyc/2);
-      LAMP_cycle_delta(scyc*dcyc);
-      sensor_idle_tick = RTC_get_tick();
-    }
-    if (dlig > 20) {
-      dlig -= 20;
-      dlig = 1 + MIN(24, dlig/4);
-      LAMP_light_delta(slig*dlig);
-      sensor_idle_tick = RTC_get_tick();
-    }
-  }
-
-  if (RTC_TICK_TO_S(RTC_get_tick() - sensor_idle_tick) >= APP_KEEP_SENSORS_ALIVE_S) {
-    SENS_enter_idle();
-  }
-}
-
-static s32_t cli_temp(u32_t argc) {
-  SENS_read_temp();
-  return CLI_OK;
-}
 
 static s32_t cli_info(u32_t argc) {
   RCC_ClocksTypeDef clocks;
@@ -379,12 +242,9 @@ static s32_t cli_info(u32_t argc) {
 
 
 CLI_EXTERN_MENU(common)
-CLI_EXTERN_MENU(wifi)
 
 CLI_MENU_START_MAIN
 CLI_EXTRAMENU(common)
-CLI_SUBMENU(wifi, "wifi", "SUBMENU: wifi module")
-CLI_FUNC("temp", cli_temp, "Reads temperature")
 CLI_FUNC("info", cli_info, "Prints system info")
 CLI_FUNC("help", cli_help, "Prints help")
 CLI_MENU_END

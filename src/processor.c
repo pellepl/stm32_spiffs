@@ -107,10 +107,6 @@ static void NVIC_config(void)
   NVIC_SetPriority(RTCAlarm_IRQn, NVIC_EncodePriority(prioGrp, 0, 0));
   NVIC_EnableIRQ(RTCAlarm_IRQn);
 #endif
-
-  // WS2812B driver
-  NVIC_SetPriority(DMA1_Channel5_IRQn, NVIC_EncodePriority(prioGrp, 5, 0));
-  NVIC_EnableIRQ(DMA1_Channel5_IRQn);
 }
 
 static void UART1_config() {
@@ -286,9 +282,6 @@ void PROC_base_init() {
 
 void PROC_periph_init() {
   DBGMCU_Config(STM32_SYSTEM_TIMER_DBGMCU, ENABLE);
-
-  // led
-  gpio_config(PORTC, PIN13, CLK_50MHZ, OUT, AF0, PUSHPULL, NOPULL);
 
   SPI_config();
   I2C_config();

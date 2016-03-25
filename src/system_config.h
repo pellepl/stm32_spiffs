@@ -13,7 +13,7 @@
 #include "stm32f10x.h"
 
 
-#define APP_NAME "WISLEEP"
+#define APP_NAME "SPIFFS_STM32s"
 
 /****************************************/
 /***** Functionality block settings *****/
@@ -47,23 +47,36 @@
 // internal flash start address
 #define FLASH_START       FLASH_BASE
 // internal flash page erase size
-#define FLASH_PAGE_SIZE   0x400 // md
+#define FLASH_PAGE_SIZE   0x800 // hd
 // internal flash protection/unprotection for firmware
 #define FLASH_PROTECT     FLASH_WRProt_AllPages
 // internal flash total size in bytes
-#define FLASH_TOTAL_SIZE  (128*1024) // md
+#define FLASH_TOTAL_SIZE  (512*1024) // hd
 
 /** UART **/
+
+#ifdef CONFIG_UART1
+#define UART1_GPIO_PORT       GPIOA
+#define UART1_GPIO_RX         GPIO_Pin_10
+#define UART1_GPIO_TX         GPIO_Pin_9
+#endif
 
 #ifdef CONFIG_UART2
 #define UART2_GPIO_PORT       GPIOA
 #define UART2_GPIO_RX         GPIO_Pin_3
 #define UART2_GPIO_TX         GPIO_Pin_2
 #endif
-#ifdef CONFIG_UART1
-#define UART1_GPIO_PORT       GPIOA
-#define UART1_GPIO_RX         GPIO_Pin_10
-#define UART1_GPIO_TX         GPIO_Pin_9
+
+#ifdef CONFIG_UART3
+#define UART3_GPIO_PORT       GPIOD
+#define UART3_GPIO_RX         GPIO_Pin_9
+#define UART3_GPIO_TX         GPIO_Pin_8
+#endif
+
+#ifdef CONFIG_UART4
+#define UART4_GPIO_PORT       GPIOC
+#define UART4_GPIO_RX         GPIO_Pin_11
+#define UART4_GPIO_TX         GPIO_Pin_10
 #endif
 
 /** SPI **/
@@ -165,10 +178,8 @@ typedef u16_t system_counter_type;
 
 /** UART **/
 
-#define UARTSTDIN       1
-#define UARTSTDOUT      1
-#define UARTWIFIIN      0
-#define UARTWIFIOUT     0
+#define UARTSTDIN       0
+#define UARTSTDOUT      0
 
 #define UART2_SPEED 460800
 #define UART1_SPEED 921600
@@ -176,11 +187,17 @@ typedef u16_t system_counter_type;
 #define USE_COLOR_CODING
 
 /** IO **/
-#define CONFIG_IO_MAX   2
+#define CONFIG_IO_MAX   1
 
-#define IOSTD        1
+#define IOSTD        0
 #define IODBG        IOSTD
-#define IOWIFI       0
+
+
+/** SPIFLASH **/
+
+// spi flash chip select port and pin
+#define SPI_FLASH_GPIO_PORT          GPIOA
+#define SPI_FLASH_GPIO_PIN           GPIO_Pin_4
 
 /** MATH **/
 
@@ -195,7 +212,6 @@ typedef u16_t system_counter_type;
 
 /** APP **/
 
-#define WS2812B_NBR_OF_LEDS 16
 #define CONFIG_RTC_CLOCK_HZ 32768
 #define CONFIG_RTC_PRESCALER 32
 
@@ -214,7 +230,7 @@ typedef u16_t system_counter_type;
 #define DBG_MS_PREFIX          1
 
 // enable or disable tracing
-//#define DBG_TRACE_MON
+#define DBG_TRACE_MON
 #define TRACE_SIZE            (64)
 
 #define VALID_RAM(x) \
