@@ -1,0 +1,14 @@
+/build
+build-number.txt
+.project
+.settings
+.cproject
+*.classpath
+*.b#*
+*.s#*
+config_header.h
+*~
+_stm32flash.script
+src/esp8266/build
+src/esp8266/firmware
+
