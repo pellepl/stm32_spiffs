@@ -9,7 +9,7 @@
 #ifdef CONFIG_I2C
 #include "i2c_driver.h"
 #endif
-
+#include "os.h"
 
 /**
   * @brief  This function handles NMI exception.
@@ -195,8 +195,6 @@ void ADC1_2_IRQHandler(void)
   TRACE_IRQ_EXIT(ADC1_2_IRQn);
 }
 #endif
-
-
 /**
   * @}
   */ 

@@ -40,6 +40,7 @@ stmcmsisdircore = ${stmlibdir}/CMSIS/CM3/CoreSupport
 tools = ${basetoolsdir}/bin
 
 gensysdir = ./generic_embedded
+spiffs = ./spiffs
 
 CPATH =
 SPATH =
@@ -99,6 +100,9 @@ INC			+= -I./${sourcedir}
 
 # generic system configuration
 include ${CONFIG_MAKE}
+
+# spiffs
+include ${spiffs}/files.mk
 
 # common  files
 

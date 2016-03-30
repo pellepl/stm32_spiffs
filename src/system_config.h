@@ -13,7 +13,7 @@
 #include "stm32f10x.h"
 
 
-#define APP_NAME "SPIFFS_STM32s"
+#define APP_NAME "SPIFFS_STM32"
 
 /****************************************/
 /***** Functionality block settings *****/
@@ -164,8 +164,22 @@ typedef u16_t system_counter_type;
 // os ticker cpu clock div
 #define SYS_OS_TICK_DIV       8
 
-/** ARCH **/
+/** OS **/
 
+// ctx switch frequency in hertz
+#define CONFIG_OS_PREEMPT_FREQ  2000
+// if enabled, signalled threads will be executed in next ctx switch
+#define CONFIG_OS_BUMP          1
+// use taskq as kernel, not being in a thread
+#define CONFIG_OS_TASKQ_KERNEL  1
+
+#define OS_DBG_MON              1
+#define OS_STACK_CHECK          1
+#define OS_RUNTIME_VALIDITY_CHECK 1
+#define OS_STACK_USAGE_CHECK    1
+
+/** ARCH **/
+#if 0
 #define CONFIG_ARCH_CRITICAL_DISABLE_IRQ \
   do { \
     __set_BASEPRI(0x02<<(8-__NVIC_PRIO_BITS)); \
@@ -175,6 +189,7 @@ typedef u16_t system_counter_type;
   do { \
     __set_BASEPRI(0x00); \
 } while (0)
+#endif
 
 /** UART **/
 

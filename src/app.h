@@ -21,4 +21,5 @@ void APP_init(void);
 void APP_shutdown(void);
 void APP_claim(u8_t resource);
 void APP_release(u8_t resource);
+void APP_rtc_cb(void);
 #endif /* APP_H_ */

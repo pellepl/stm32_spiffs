@@ -22,6 +22,7 @@
 #ifdef CONFIG_RTC
 #include "rtc.h"
 #endif
+#include "os.h"
 
 #include "cli.h"
 
@@ -37,6 +38,9 @@ int main(void) {
   UART_init();
   UART_assure_tx(_UART(UARTSTDOUT), TRUE);
   PROC_periph_init();
+#ifdef CONFIG_OS
+  OS_init();
+#endif
   exit_critical();
 
   SYS_set_assert_callback(app_assert_cb);
@@ -53,7 +57,7 @@ int main(void) {
   WDOG_init();
 #endif
 #ifdef CONFIG_RTC
-  if (RTC_init(NULL)) { // TODO
+  if (RTC_init(APP_rtc_cb)) { // TODO
     rtc_datetime dt = {
         .date.year = 2016,
         .date.month = 0,

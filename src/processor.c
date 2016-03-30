@@ -59,53 +59,53 @@ static void NVIC_config(void)
   // STM32 7 6 5 4 3 2 1 0
   //       I I I I X X X X
   //
-  // priogrp 4 =>
+  // priogrp 7 =>
   // STM32 7 6 5 4 3 2 1 0
-  //       P P P S X X X X
-  // preempt prio 0..7
-  // subprio      0..1
+  //       P S S S X X X X
+  // preempt prio 0..1
+  // subprio      0..7
 
   // Configure the NVIC Preemption Priority Bits
-  // use 3 bits for preemption and 1 bit for  subgroup
-  u8_t prioGrp = 8 - __NVIC_PRIO_BITS;
-  // use 4 bits for preemption and 0 subgroups
-  //u8_t prioGrp = 8 - __NVIC_PRIO_BITS - 1;
-  NVIC_SetPriorityGrouping(prioGrp);
-
+  // use 1 bit for preemption and 3 bits for subgroups
+  u8_t prioGrp = 6;
 
   // Config pendsv interrupt, lowest
-  NVIC_SetPriority(PendSV_IRQn, NVIC_EncodePriority(prioGrp, 7, 1));
+  NVIC_SetPriority(PendSV_IRQn, NVIC_EncodePriority(prioGrp, 1, 7));
 
   // Config & enable uarts interrupt
 #ifdef CONFIG_UART2
-  NVIC_SetPriority(USART2_IRQn, NVIC_EncodePriority(prioGrp, 7, 0));
+  NVIC_SetPriority(USART2_IRQn, NVIC_EncodePriority(prioGrp, 1, 6));
   NVIC_EnableIRQ(USART2_IRQn);
 #endif
 #ifdef CONFIG_UART1
-  NVIC_SetPriority(USART1_IRQn, NVIC_EncodePriority(prioGrp, 7, 0));
+  NVIC_SetPriority(USART1_IRQn, NVIC_EncodePriority(prioGrp, 1, 6));
   NVIC_EnableIRQ(USART1_IRQn);
 #endif
 
 #ifdef CONFIG_SPI
   // Config & enable the SPI-DMA interrupt
 #ifdef CONFIG_SPI1
-  NVIC_SetPriority(SPI1_MASTER_Rx_IRQ_Channel, NVIC_EncodePriority(prioGrp, 7, 0));
+  NVIC_SetPriority(SPI1_MASTER_Rx_IRQ_Channel, NVIC_EncodePriority(prioGrp, 1, 6));
   NVIC_EnableIRQ(SPI1_MASTER_Rx_IRQ_Channel);
-  NVIC_SetPriority(SPI1_MASTER_Tx_IRQ_Channel, NVIC_EncodePriority(prioGrp, 7, 1));
+  NVIC_SetPriority(SPI1_MASTER_Tx_IRQ_Channel, NVIC_EncodePriority(prioGrp, 1, 6));
   NVIC_EnableIRQ(SPI1_MASTER_Tx_IRQ_Channel);
 #endif
 #endif
 
 #ifdef CONFIG_I2C
-  NVIC_SetPriority(I2C2_EV_IRQn, NVIC_EncodePriority(prioGrp, 7, 1));
+  NVIC_SetPriority(I2C2_EV_IRQn, NVIC_EncodePriority(prioGrp, 1, 6));
   NVIC_EnableIRQ(I2C2_EV_IRQn);
-  NVIC_SetPriority(I2C2_ER_IRQn, NVIC_EncodePriority(prioGrp, 7, 1));
+  NVIC_SetPriority(I2C2_ER_IRQn, NVIC_EncodePriority(prioGrp, 1, 6));
   NVIC_EnableIRQ(I2C2_ER_IRQn);
 #endif
 
 #ifdef CONFIG_RTC
-  NVIC_SetPriority(RTCAlarm_IRQn, NVIC_EncodePriority(prioGrp, 0, 0));
+  NVIC_SetPriority(RTCAlarm_IRQn, NVIC_EncodePriority(prioGrp, 0, 1));
   NVIC_EnableIRQ(RTCAlarm_IRQn);
+#endif
+
+#ifdef CONFIG_OS
+  NVIC_SetPriority(SysTick_IRQn, NVIC_EncodePriority(prioGrp, 1, 6));
 #endif
 }
 
@@ -287,5 +287,14 @@ void PROC_periph_init() {
   I2C_config();
   UART1_config();
   UART2_config();
+
+#ifdef CONFIG_SPI
+  GPIO_InitTypeDef GPIO_InitStructure;
+  // spiflash config CS pin
+  GPIO_InitStructure.GPIO_Pin = SPI_FLASH_GPIO_PIN;
+  GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+  GPIO_Init(SPI_FLASH_GPIO_PORT, &GPIO_InitStructure);
+#endif
 }
 
