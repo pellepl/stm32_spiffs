@@ -624,7 +624,7 @@ static void app_spin(void) {
 
     if (os_wup_res == OS_WUP_RUNNING || os_wup_res == OS_WUP_SLEEP_RUNNING) {
       // have running threads, reschedule - no tasks left, so threads should be chosen
-      print("no sleep, run threads\n");
+      //print("no sleep, run threads\n");
       OS_force_ctx_switch();
       continue;
     }
@@ -633,7 +633,7 @@ static void app_spin(void) {
     if (cpu_claims || (wakeup_alarm && (wu_tick - cur_tick < RTC_MS_TO_TICK(APP_PREVENT_SLEEP_IF_LESS_MS)))) {
       // resources held or too soon to wake up to go sleep, just snooze
       DBG(D_APP, D_INFO, "..snoozing %i ms, %i resources claimed\n", (u32_t)(taskq_wakeup_ms - RTC_TICK_TO_MS(RTC_get_tick())), cpu_claims);
-      print("..snoozing for %i ms, %i resources claimed\n", (u32_t)(taskq_wakeup_ms - RTC_TICK_TO_MS(RTC_get_tick())), cpu_claims);
+      //print("..snoozing for %i ms, %i resources claimed\n", (u32_t)(taskq_wakeup_ms - RTC_TICK_TO_MS(RTC_get_tick())), cpu_claims);
       while (RTC_get_tick() <= wu_tick && cpu_claims && !TASK_tick()) {
         __WFI();
       }
