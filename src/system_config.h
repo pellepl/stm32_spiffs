@@ -230,6 +230,12 @@ typedef u16_t system_counter_type;
 #define CONFIG_RTC_CLOCK_HZ 32768
 #define CONFIG_RTC_PRESCALER 32
 
+/** LEDS **/
+// HY-STM32
+#define PIN_LED1 PORTC, PIN6
+#define PIN_LED2 PORTC, PIN7
+#define PIN_LED3 PORTD, PIN13
+#define PIN_LED4 PORTD, PIN6
 
 /** DEBUG **/
 

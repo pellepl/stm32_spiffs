@@ -10,13 +10,14 @@
 
 #include "system.h"
 #include "miniutils.h"
+#include "app.h"
 
 // compile time switches
 
-#define SPIFFS_DBG(...)                 //print(__VA_ARGS__)
-#define SPIFFS_GC_DBG(...)              //print(__VA_ARGS__)
-#define SPIFFS_CACHE_DBG(...)           //print(__VA_ARGS__)
-#define SPIFFS_CHECK_DBG(...)           //print(__VA_ARGS__)
+#define SPIFFS_DBG(...)                 if (_spiffs_dbg_generic)  print("      "__VA_ARGS__)
+#define SPIFFS_GC_DBG(...)              if (_spiffs_dbg_gc)       print("      "__VA_ARGS__)
+#define SPIFFS_CACHE_DBG(...)           if (_spiffs_dbg_cache)    print("      "__VA_ARGS__)
+#define SPIFFS_CHECK_DBG(...)           if (_spiffs_dbg_check)    print("      "__VA_ARGS__)
 
 #define SPIFFS_BUFFER_HELP              0
 #define SPIFFS_CACHE                    1
@@ -40,7 +41,7 @@
 #define SPIFFS_CFG_PHYS_ADDR(ignore)    (0)
 #define SPIFFS_CFG_LOG_PAGE_SZ(ignore)  (256)
 #define SPIFFS_CFG_LOG_BLOCK_SZ(ignore) (65536)
-#define SPIFFS_ALIGNED_OBJECT_INDEX_TABLES    0
+#define SPIFFS_ALIGNED_OBJECT_INDEX_TABLES    1
 #define SPIFFS_HAL_CALLBACK_EXTRA       0
 #define SPIFFS_FILEHDL_OFFSET           0
 #define SPIFFS_READ_ONLY                0
@@ -49,9 +50,9 @@
 #define spiffs_printf(...)                print(__VA_ARGS__)
 
 #define SPIFFS_TEST_VIS_FREE_STR          "_"
-#define SPIFFS_TEST_VIS_DELE_STR          "/"
-#define SPIFFS_TEST_VIS_INDX_STR(id)      "i"
-#define SPIFFS_TEST_VIS_DATA_STR(id)      "d"
+#define SPIFFS_TEST_VIS_DELE_STR          TEXT_BAD("/")
+#define SPIFFS_TEST_VIS_INDX_STR(id)      TEXT_NOTE("I")
+#define SPIFFS_TEST_VIS_DATA_STR(id)      TEXT_GOOD("d")
 
 typedef u16_t spiffs_block_ix;
 typedef u16_t spiffs_page_ix;

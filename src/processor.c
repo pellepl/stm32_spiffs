@@ -278,6 +278,9 @@ void PROC_base_init() {
   RCC_config();
   NVIC_config();
   TIM_config();
+
+  // trap on unaligned memory accesses
+  //SCB->CCR |= SCB_CCR_UNALIGN_TRP;
 }
 
 void PROC_periph_init() {

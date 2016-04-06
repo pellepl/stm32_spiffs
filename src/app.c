@@ -37,6 +37,13 @@ static u8_t spiffs_fd[32*8];
 static u8_t spiffs_cache[32+(32+SPIFFS_CFG_LOG_PAGE_SZ()*8)];
 static u8_t spiffs_work[SPIFFS_CFG_LOG_PAGE_SZ()*2];
 
+bool _spiffs_dbg_generic = FALSE;
+bool _spiffs_dbg_cache = FALSE;
+bool _spiffs_dbg_gc = FALSE;
+bool _spiffs_dbg_check = FALSE;
+
+
+
 static struct spiffs_arg_s {
   char fname[SPIFFS_OBJ_NAME_LEN];
   char fname_new[SPIFFS_OBJ_NAME_LEN];
@@ -58,9 +65,12 @@ static void spif_spiffs_cb(spi_flash_dev *d, int res) {
 }
 
 static s32_t spiflash_await(void) {
+  gpio_enable(PIN_LED1);
   while (spiflash_busy) {
     OS_cond_wait(&spiffs_cond, NULL);
   }
+  gpio_disable(PIN_LED1);
+
   return spiflash_result;
 }
 
@@ -117,6 +127,7 @@ static const char *spiffs_errstr(s32_t err) {
 
 static s32_t _spiffs_erase(u32_t addr, u32_t len) {
   int res;
+  gpio_enable(PIN_LED4);
   WDOG_feed();
   spiflash_busy = TRUE;
   if ((res = SPI_FLASH_erase(SPI_FLASH, spif_spiffs_cb, addr, len)) != SPI_OK) {
@@ -124,28 +135,33 @@ static s32_t _spiffs_erase(u32_t addr, u32_t len) {
   } else {
     res = spiflash_await();
   }
+  gpio_disable(PIN_LED4);
   return res;
 }
 
 static s32_t _spiffs_read(u32_t addr, u32_t size, u8_t *dst) {
   int res;
+  gpio_enable(PIN_LED2);
   spiflash_busy = TRUE;
   if ((res = SPI_FLASH_read(SPI_FLASH, spif_spiffs_cb, addr, size, dst)) != SPI_OK) {
     spiflash_busy = FALSE;
   } else {
     res = spiflash_await();
   }
+  gpio_disable(PIN_LED2);
   return res;
 }
 
 static s32_t _spiffs_write(u32_t addr, u32_t size, u8_t *src) {
   int res;
+  gpio_enable(PIN_LED3);
   spiflash_busy = TRUE;
   if ((res = SPI_FLASH_write(SPI_FLASH, spif_spiffs_cb, addr, size, src)) != SPI_OK) {
     spiflash_busy = FALSE;
   } else {
     res = spiflash_await();
   }
+  gpio_disable(PIN_LED3);
   return res;
 }
 
@@ -165,45 +181,46 @@ static s32_t _spiffs_open_spiflash(void) {
 static u32_t old_perc = 999;
 static void _spiffs_check_cb_f(spiffs_check_type type, spiffs_check_report report,
     u32_t arg1, u32_t arg2) {
-  if (report == SPIFFS_CHECK_PROGRESS && old_perc != arg1) {
-    old_perc = arg1;
-    print("CHECK REPORT: ");
+  u32_t perc = arg1 * 100 / 256;
+  if (report == SPIFFS_CHECK_PROGRESS && old_perc != perc) {
+    old_perc = perc;
+    print(TEXT_NOTE("CHECK REPORT: "));
     switch(type) {
     case SPIFFS_CHECK_LOOKUP:
-      print("LU "); break;
+      print(TEXT_NOTE("LU ")); break;
     case SPIFFS_CHECK_INDEX:
-      print("IX "); break;
+      print(TEXT_NOTE("IX ")); break;
     case SPIFFS_CHECK_PAGE:
-      print("PA "); break;
+      print(TEXT_NOTE("PA ")); break;
     }
-    print("%i%%\n", arg1 * 100 / 256);
+    print(TEXT_NOTE("%i%%\n"), perc);
   }
   if (report != SPIFFS_CHECK_PROGRESS) {
-    print("   check: ");
+    print(TEXT_BAD("   check: "));
     switch (type) {
     case SPIFFS_CHECK_INDEX:
-      print("INDEX  "); break;
+      print(TEXT_BAD("INDEX  ")); break;
     case SPIFFS_CHECK_LOOKUP:
-      print("LOOKUP "); break;
+      print(TEXT_BAD("LOOKUP ")); break;
     case SPIFFS_CHECK_PAGE:
-      print("PAGE   "); break;
+      print(TEXT_BAD("PAGE   ")); break;
     default:
-      print("????   "); break;
+      print(TEXT_BAD("????   ")); break;
     }
     if (report == SPIFFS_CHECK_ERROR) {
-      print("ERROR %i", arg1);
+      print(TEXT_BAD("ERROR %i"), arg1);
     } else if (report == SPIFFS_CHECK_DELETE_BAD_FILE) {
-      print("DELETE BAD FILE %04x", arg1);
+      print(TEXT_BAD("DELETE BAD FILE %04x"), arg1);
     } else if (report == SPIFFS_CHECK_DELETE_ORPHANED_INDEX) {
-      print("DELETE ORPHANED INDEX %04x", arg1);
+      print(TEXT_BAD("DELETE ORPHANED INDEX %04x"), arg1);
     } else if (report == SPIFFS_CHECK_DELETE_PAGE) {
-      print("DELETE PAGE %04x", arg1);
+      print(TEXT_BAD("DELETE PAGE %04x"), arg1);
     } else if (report == SPIFFS_CHECK_FIX_INDEX) {
-      print("FIX INDEX %04x:%04x", arg1, arg2);
+      print(TEXT_BAD("FIX INDEX %04x:%04x"), arg1, arg2);
     } else if (report == SPIFFS_CHECK_FIX_LOOKUP) {
-      print("FIX INDEX %04x:%04x", arg1, arg2);
+      print(TEXT_BAD("FIX INDEX %04x:%04x"), arg1, arg2);
     } else {
-      print("??");
+      print(TEXT_BAD("??"));
     }
     print("\n");
   }
@@ -297,8 +314,9 @@ static void *thr_spiffs_ls(void *arg) {
   struct spiffs_dirent *pe = &e;
 
   SPIFFS_opendir(&fs, "/", &d);
+  print("  OBJID   SIZE    NAME\n");
   while ((pe = SPIFFS_readdir(&d, pe))) {
-    print("  %32s [0x%04x] size:%i\n", pe->name, pe->obj_id, pe->size);
+    print("  0x%04x  %6i  %s\n", pe->obj_id, pe->size, pe->name);
   }
   print("\n");
   SPIFFS_closedir(&d);
@@ -339,21 +357,23 @@ static void *thr_spiffs_lesshex(void *v_spiffs_arg) {
           }
 
           offs += res;
+          print("\n");
         } else {
           for (i = 0; i < res; i++) {
             print("%c", buf[i]);
           }
         }
       }
-      print("\n");
     } while (res > 0);
     if (res == 0) {
       SPIFFS_clearerr(&fs);
     }
+    print("\n");
   } while (0);
   if (fd >= 0) {
     res = SPIFFS_close(&fs, fd);
   }
+  if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) SPIFFS_clearerr(&fs);
 
   print("SPIFFS read %s [%i%s]\n", arg->fname, SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
 
@@ -403,6 +423,8 @@ static void *thr_spiffs_read(void *v_spiffs_arg) {
     }
     print("\n");
   } while (res > 0 && remain > 0);
+
+  if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) SPIFFS_clearerr(&fs);
 
   print("SPIFFS read %i of %i [%i%s]\n", rlen, arg->data_len, SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
   spiffs_locked = FALSE;
@@ -465,16 +487,24 @@ static void *thr_spiffs_copy(void *v_spiffs_arg) {
   s32_t res = 0;
   do {
     spiffs_file fd_src = SPIFFS_open(&fs, arg->fname, SPIFFS_O_RDONLY, 0);
-    if (fd_src < 0) break;
+    if (fd_src < 0) {
+      print("Could not open %s\n", arg->fname);
+      break;
+    }
     spiffs_file fd_dst = SPIFFS_open(&fs, arg->fname_new, SPIFFS_O_CREAT | SPIFFS_O_TRUNC | SPIFFS_O_WRONLY, 0);
     if (fd_dst < 0) {
+      print("Could not open %s\n", arg->fname_new);
       SPIFFS_close(&fs, fd_src);
       break;
     }
     bool write_ok = TRUE;
-    while (write_ok && (res == SPIFFS_read(&fs, fd_src, spiffs_arg.data, sizeof(spiffs_arg.data))) > 0) {
+    while (write_ok && (res = SPIFFS_read(&fs, fd_src, spiffs_arg.data, sizeof(spiffs_arg.data))) > 0) {
       res = SPIFFS_write(&fs, fd_dst, spiffs_arg.data, res);
       write_ok = res > 0;
+    }
+    if (res < 0 && SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) {
+      res = 0;
+      SPIFFS_clearerr(&fs);
     }
     if (res < 0) {
       print("SPIFFS copy inner [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
@@ -708,6 +738,15 @@ void APP_init(void) {
   RCC_ClearFlag();
 
   cpu_claims = 0;
+
+  gpio_disable(PIN_LED1);
+  gpio_disable(PIN_LED2);
+  gpio_disable(PIN_LED3);
+  gpio_disable(PIN_LED4);
+  gpio_config_out(PIN_LED1, CLK_2MHZ, PUSHPULL, NOPULL);
+  gpio_config_out(PIN_LED2, CLK_2MHZ, PUSHPULL, NOPULL);
+  gpio_config_out(PIN_LED3, CLK_2MHZ, PUSHPULL, NOPULL);
+  gpio_config_out(PIN_LED4, CLK_2MHZ, PUSHPULL, NOPULL);
 
   task *heatbeat_task = TASK_create(heartbeat, TASK_STATIC);
   TASK_start_timer(heatbeat_task, &heartbeat_timer, 0, 0, 0, APP_HEARTBEAT_MS, "heartbeat");
@@ -971,6 +1010,49 @@ static s32_t cli_spiffs_vis(u32_t argc) {
   return cli_call_spiffs_generic(thr_spiffs_vis);
 }
 
+static s32_t cli_spiffs_dbg(u32_t argc,  ...) {
+  if (argc > 0) {
+    va_list va;
+    va_start(va, argc);
+    u32_t i;
+    _spiffs_dbg_generic = FALSE;
+    _spiffs_dbg_gc = FALSE;
+    _spiffs_dbg_cache = FALSE;
+    _spiffs_dbg_check = FALSE;
+    for (i = 0; i < argc; i++) {
+      char *d = va_arg(va, char *);
+      if (strcmp("sys", d) == 0) {
+        _spiffs_dbg_generic = TRUE;
+      } else if (strcmp("cache", d) == 0) {
+        _spiffs_dbg_cache = TRUE;
+      } else if (strcmp("gc", d) == 0) {
+        _spiffs_dbg_gc = TRUE;
+      } else if (strcmp("check", d) == 0) {
+        _spiffs_dbg_check = TRUE;
+      } else if (strcmp("all", d) == 0) {
+        _spiffs_dbg_generic = TRUE;
+        _spiffs_dbg_cache = TRUE;
+        _spiffs_dbg_gc = TRUE;
+        _spiffs_dbg_check = TRUE;
+      } else {
+        print("warn: unknown option %s\n", d);
+      }
+    }
+    va_end(va);
+  }
+
+  if (!(_spiffs_dbg_generic | _spiffs_dbg_gc | _spiffs_dbg_cache | _spiffs_dbg_check)) {
+    print("SPIFFS dbg: off\n");
+  } else {
+    print("SPIFFS dbg: %s%s%s%s\n",
+        _spiffs_dbg_generic ? "sys " : "",
+        _spiffs_dbg_gc ? "gc " : "",
+        _spiffs_dbg_cache ? "cache " : "",
+        _spiffs_dbg_cache ? "check" : "");
+  }
+
+  return 0;
+}
 
 CLI_EXTERN_MENU(common)
 
@@ -994,6 +1076,8 @@ CLI_FUNC("mv", cli_spiffs_rename, "Renames file\nmv <oldname> <newname>\n")
 CLI_FUNC("cp", cli_spiffs_copy, "Copies file\ncp <srcname> <dstname>\n")
 CLI_FUNC("gc", cli_spiffs_gc, "Performs a garbage collection\ngc <num bytes to free>\n")
 CLI_FUNC("vis", cli_spiffs_vis, "Debug dump FS\n")
+CLI_FUNC("dbg", cli_spiffs_dbg, "Enable disable fs debug\n"
+    "dbg <all | sys | cache | gc | check>\n")
 CLI_MENU_END
 
 CLI_MENU_START_MAIN

@@ -76,6 +76,7 @@ LD_SCRIPT = arm.ld
 INCLUDE_DIRECTIVES =
 COMPILEROPTIONS = $(INCLUDE_DIRECTIVES) $(FLAGS) -mcpu=cortex-m3 -mno-thumb-interwork -mthumb -Wall -gdwarf-2 -Wno-packed-bitfield-compat -ffunction-sections -fdata-sections
 COMPILEROPTIONS += -Os -nostartfiles -nostdlib 
+#COMPILEROPTIONS += -mno-unaligned-access
 ASSEMBLEROPTION = $(COMPILEROPTIONS)
 LINKERSCRIPT = $(LD_SCRIPT)
 LINKEROPTIONS = --gc-sections -cref

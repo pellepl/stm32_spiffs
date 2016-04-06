@@ -16,6 +16,11 @@
 #define APP_CLI_POLL_MS                 1000
 #define APP_CLI_INACT_SHUTDOWN_S        3
 
+extern bool _spiffs_dbg_generic;
+extern bool _spiffs_dbg_cache;
+extern bool _spiffs_dbg_gc;
+extern bool _spiffs_dbg_check;
+
 // initializes application
 void APP_init(void);
 void APP_shutdown(void);
