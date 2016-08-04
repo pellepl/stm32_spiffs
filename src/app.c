@@ -42,7 +42,7 @@ bool _spiffs_dbg_cache = FALSE;
 bool _spiffs_dbg_gc = FALSE;
 bool _spiffs_dbg_check = FALSE;
 
-
+static u8_t generic_buffer[1024];
 
 static struct spiffs_arg_s {
   char fname[SPIFFS_OBJ_NAME_LEN];
@@ -514,6 +514,35 @@ static void *thr_spiffs_copy(void *v_spiffs_arg) {
   } while (0);
 
   print("SPIFFS copy [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
+  spiffs_locked = FALSE;
+  return (void *)res;
+}
+
+static void *thr_spiffs_timedread(void *v_spiffs_arg) {
+  struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
+  s32_t res = 0;
+  do {
+    spiffs_file fd = SPIFFS_open(&fs, arg->fname, SPIFFS_O_RDONLY, 0);
+    if (fd < 0) {
+      print("Could not open %s\n", arg->fname);
+      break;
+    }
+    sys_time then = SYS_get_time_ms();
+    u32_t read_bytes = 0;
+    while ((res = SPIFFS_read(&fs, fd, generic_buffer, sizeof(generic_buffer))) >= 0) {
+      read_bytes += res;
+    }
+    sys_time now = SYS_get_time_ms();
+    if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) {
+      SPIFFS_clearerr(&fs);
+      res = 0;
+    }
+    (void)SPIFFS_close(&fs, fd);
+    sys_time ms = now-then;
+    int ms_int = now-then;
+    print("read %i bytes in %i ms, %i bytes/sec\n", read_bytes, ms_int, (1000*read_bytes)/ms_int);
+  } while (0);
+
   spiffs_locked = FALSE;
   return (void *)res;
 }
@@ -1000,6 +1029,13 @@ static s32_t cli_spiffs_copy(u32_t argc, char *fname_src, char *fname_dst) {
   return cli_call_spiffs_generic(thr_spiffs_copy);
 }
 
+static s32_t cli_spiffs_timedread(u32_t argc, char *fname) {
+  if (argc < 1) return -2;
+  memcpy(spiffs_arg.fname, fname, SPIFFS_OBJ_NAME_LEN);
+  return cli_call_spiffs_generic(thr_spiffs_timedread);
+}
+
+
 static s32_t cli_spiffs_gc(u32_t argc, u32_t bytes) {
   if (argc < 1) return -2;
   spiffs_arg.data_len = bytes;
@@ -1074,6 +1110,7 @@ CLI_FUNC("tell", cli_spiffs_tell, "Returns offset of filedescriptor\ntell <filed
 CLI_FUNC("rm", cli_spiffs_remove, "Removes file\nrm <name>\n")
 CLI_FUNC("mv", cli_spiffs_rename, "Renames file\nmv <oldname> <newname>\n")
 CLI_FUNC("cp", cli_spiffs_copy, "Copies file\ncp <srcname> <dstname>\n")
+CLI_FUNC("timedrd", cli_spiffs_timedread, "Reads all file, timing it\ntimedrd <name>\n")
 CLI_FUNC("gc", cli_spiffs_gc, "Performs a garbage collection\ngc <num bytes to free>\n")
 CLI_FUNC("vis", cli_spiffs_vis, "Debug dump FS\n")
 CLI_FUNC("dbg", cli_spiffs_dbg, "Enable disable fs debug\n"

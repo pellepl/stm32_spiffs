@@ -45,6 +45,8 @@
 #define SPIFFS_HAL_CALLBACK_EXTRA       0
 #define SPIFFS_FILEHDL_OFFSET           0
 #define SPIFFS_READ_ONLY                0
+#define SPIFFS_TEMPORAL_FD_CACHE        1
+#define SPIFFS_TEMPORAL_CACHE_HIT_SCORE 4
 #define SPIFFS_TEST_VISUALISATION       1
 
 #define spiffs_printf(...)                print(__VA_ARGS__)
