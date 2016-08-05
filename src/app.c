@@ -55,6 +55,7 @@ static struct spiffs_arg_s {
   u32_t data_len;
   u32_t chunksize;
   s32_t offs;
+  bool time_per_chunk;
 } spiffs_arg;
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -272,7 +273,7 @@ static s32_t _spiffs_mount(void) {
   return 0;
 }
 
-static u32_t hash(spiffs *fs, const u8_t *name) {
+static u32_t hash(const u8_t *name) {
   (void)fs;
   u32_t hash = 5381;
   u8_t c;
@@ -288,14 +289,15 @@ static u32_t hash(spiffs *fs, const u8_t *name) {
 
 // ================== BENCH ===================
 
-static void *thr_spiffs_timedwrite(void *v_spiffs_arg) {
+static void *thr_bench_timedwrite(void *v_spiffs_arg) {
   s32_t res = 0;
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   u32_t len = arg->data_len;
   u32_t chunksize = arg->chunksize;
   if (chunksize == 0) chunksize = 1;
   if (chunksize > sizeof(generic_buffer)) chunksize = sizeof(generic_buffer);
-  rand_seed(hash(arg->fname));
+  u32_t rnd = hash((u8_t *)arg->fname);
+  rand_seed(rnd);
 
   spiffs_file fd = SPIFFS_open(&fs, arg->fname,
       SPIFFS_O_WRONLY | SPIFFS_O_CREAT | SPIFFS_O_TRUNC, 0);
@@ -306,29 +308,37 @@ static void *thr_spiffs_timedwrite(void *v_spiffs_arg) {
 
   print("Timed write of %s, length %i, chunk size %i...\n", arg->fname, len, chunksize);
 
-  sys_time then, now, elapsed = 0;
 
-  while (len < 0) {
-    int i;
-    u32_t len2write = MIN(len, chunksize);
-    for (i = 0; i < len2write; i++) {
-      int r = rand();
-      // fold it
-      r = (r>>16) ^ (r>>8) ^ r;
-      generic_buffer[i] = r;
-    }
+  int i;
+  for (i = 0; i < sizeof(generic_buffer); i++) {
+    rnd = rand(rnd);
+    generic_buffer[i] = (rnd>>16) ^ (rnd>>8) ^ rnd;
+  }
 
-    then = SYS_get_time_ms();
+  sys_time elapsed = 0;
+  u32_t written = 0;
+  sys_time mark_prev = SYS_get_time_ms();
+  sys_time then = mark_prev;
+  while (written < len) {
+    u32_t len2write = MIN(len - written, chunksize);
     res = SPIFFS_write(&fs, fd, generic_buffer, len2write);
-    now = SYS_get_time_ms();
-    elapsed += (now - then);
     if (res < SPIFFS_OK) {
       break;
     }
-    len -= len2write;
+    if (arg->time_per_chunk) {
+      sys_time mark_cur = SYS_get_time_ms();
+      print(".. %i bytes, delta %i ms\n", written, (int)(mark_cur - mark_prev));
+      mark_prev = SYS_get_time_ms();
+    }
+   written += len2write;
   }
+  sys_time now = SYS_get_time_ms();
+  elapsed = now - then;
 
   res = SPIFFS_close(&fs, fd);
+
+  print("wrote %i bytes in %i ms, %i bytes/sec\n",
+      arg->data_len, (int)elapsed, (1000*arg->data_len)/(int)elapsed);
 
   print("benchmarked write [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
 final:
@@ -337,7 +347,7 @@ final:
  return (void *)res;
 }
 
-static void *thr_spiffs_timedread(void *v_spiffs_arg) {
+static void *thr_bench_timedread(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   u32_t chunksize = arg->chunksize;
   if (chunksize == 0) chunksize = 1;
@@ -350,10 +360,16 @@ static void *thr_spiffs_timedread(void *v_spiffs_arg) {
       break;
     }
     print("Timed read of %s, chunk size %i...\n", arg->fname, chunksize);
-    sys_time then = SYS_get_time_ms();
     u32_t read_bytes = 0;
+    sys_time mark_prev = SYS_get_time_ms();
+    sys_time then = mark_prev;
     while ((res = SPIFFS_read(&fs, fd, generic_buffer, chunksize)) >= 0) {
       read_bytes += res;
+      if (arg->time_per_chunk) {
+        sys_time mark_cur = SYS_get_time_ms();
+        print(".. %i bytes, delta %i ms\n", read_bytes, (int)(mark_cur - mark_prev));
+        mark_prev = SYS_get_time_ms();
+      }
     }
     sys_time now = SYS_get_time_ms();
     if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) {
@@ -361,9 +377,9 @@ static void *thr_spiffs_timedread(void *v_spiffs_arg) {
       res = 0;
     }
     (void)SPIFFS_close(&fs, fd);
-    sys_time ms = now-then;
-    int ms_int = now-then;
-    print("read %i bytes in %i ms, %i bytes/sec\n", read_bytes, ms_int, (1000*read_bytes)/ms_int);
+    sys_time elapsed = now-then;
+    print("read %i bytes in %i ms, %i bytes/sec\n",
+        read_bytes, (int)elapsed, (1000*read_bytes)/(int)elapsed);
   } while (0);
 
   print("benchmarked read [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
@@ -969,12 +985,26 @@ static s32_t cli_call_spiffs_generic(void *fn) {
 
 // ================== BENCH ===================
 
-static s32_t cli_spiffs_timedread(u32_t argc, char *fname, u32_t chunksize) {
+static s32_t cli_bench_timedread(u32_t argc, char *fname, u32_t chunksize, u32_t tpc) {
   if (argc < 1) return -2;
   if (argc < 2) chunksize = 1024;
+  if (argc < 3) tpc = 0;
   memcpy(spiffs_arg.fname, fname, SPIFFS_OBJ_NAME_LEN);
   spiffs_arg.chunksize = chunksize;
-  return cli_call_spiffs_generic(thr_spiffs_timedread);
+  spiffs_arg.time_per_chunk = tpc;
+  return cli_call_spiffs_generic(thr_bench_timedread);
+}
+
+
+static s32_t cli_bench_timedwrite(u32_t argc, char *fname, u32_t len, u32_t chunksize, u32_t tpc) {
+  if (argc < 2) return -2;
+  if (argc < 3) chunksize = 1024;
+  if (argc < 4) tpc = 0;
+  memcpy(spiffs_arg.fname, fname, SPIFFS_OBJ_NAME_LEN);
+  spiffs_arg.chunksize = chunksize;
+  spiffs_arg.data_len = len;
+  spiffs_arg.time_per_chunk = tpc;
+  return cli_call_spiffs_generic(thr_bench_timedwrite);
 }
 
 
@@ -1179,7 +1209,10 @@ static s32_t cli_spiffs_dbg(u32_t argc,  ...) {
 CLI_EXTERN_MENU(common)
 
 CLI_MENU_START(bench)
-CLI_FUNC("timedrd", cli_spiffs_timedread, "Reads all file, timing it\ntimedrd <name> (<chunksize>)\n")
+CLI_FUNC("timedrd", cli_bench_timedread,
+    "Reads all file, timing it\ntimedrd <name> (<chunksize>) (<report_time_per_chunk>)\n")
+CLI_FUNC("timedwr", cli_bench_timedwrite,
+    "Writes a file, timing it\ntimedwr <name> <len> (<chunksize>) (<report_time_per_chunk>)\n")
 CLI_MENU_END
 
 
