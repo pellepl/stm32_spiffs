@@ -53,6 +53,7 @@ static struct spiffs_arg_s {
   u8_t data[512];
   u8_t *data_addr;
   u32_t data_len;
+  u32_t chunksize;
   s32_t offs;
 } spiffs_arg;
 
@@ -270,6 +271,111 @@ static s32_t _spiffs_mount(void) {
   }
   return 0;
 }
+
+static u32_t hash(spiffs *fs, const u8_t *name) {
+  (void)fs;
+  u32_t hash = 5381;
+  u8_t c;
+  int i = 0;
+  while ((c = name[i++]) && i < SPIFFS_OBJ_NAME_LEN) {
+    hash = (hash * 33) ^ c;
+  }
+  return hash;
+}
+
+
+// THREAD TASKS
+
+// ================== BENCH ===================
+
+static void *thr_spiffs_timedwrite(void *v_spiffs_arg) {
+  s32_t res = 0;
+  struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
+  u32_t len = arg->data_len;
+  u32_t chunksize = arg->chunksize;
+  if (chunksize == 0) chunksize = 1;
+  if (chunksize > sizeof(generic_buffer)) chunksize = sizeof(generic_buffer);
+  rand_seed(hash(arg->fname));
+
+  spiffs_file fd = SPIFFS_open(&fs, arg->fname,
+      SPIFFS_O_WRONLY | SPIFFS_O_CREAT | SPIFFS_O_TRUNC, 0);
+  if (fd < 0) {
+    print("Could not create %s\n", arg->fname);
+    goto final;
+  }
+
+  print("Timed write of %s, length %i, chunk size %i...\n", arg->fname, len, chunksize);
+
+  sys_time then, now, elapsed = 0;
+
+  while (len < 0) {
+    int i;
+    u32_t len2write = MIN(len, chunksize);
+    for (i = 0; i < len2write; i++) {
+      int r = rand();
+      // fold it
+      r = (r>>16) ^ (r>>8) ^ r;
+      generic_buffer[i] = r;
+    }
+
+    then = SYS_get_time_ms();
+    res = SPIFFS_write(&fs, fd, generic_buffer, len2write);
+    now = SYS_get_time_ms();
+    elapsed += (now - then);
+    if (res < SPIFFS_OK) {
+      break;
+    }
+    len -= len2write;
+  }
+
+  res = SPIFFS_close(&fs, fd);
+
+  print("benchmarked write [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
+final:
+
+ spiffs_locked = FALSE;
+ return (void *)res;
+}
+
+static void *thr_spiffs_timedread(void *v_spiffs_arg) {
+  struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
+  u32_t chunksize = arg->chunksize;
+  if (chunksize == 0) chunksize = 1;
+  if (chunksize > sizeof(generic_buffer)) chunksize = sizeof(generic_buffer);
+  s32_t res = 0;
+  do {
+    spiffs_file fd = SPIFFS_open(&fs, arg->fname, SPIFFS_O_RDONLY, 0);
+    if (fd < 0) {
+      print("Could not open %s\n", arg->fname);
+      break;
+    }
+    print("Timed read of %s, chunk size %i...\n", arg->fname, chunksize);
+    sys_time then = SYS_get_time_ms();
+    u32_t read_bytes = 0;
+    while ((res = SPIFFS_read(&fs, fd, generic_buffer, chunksize)) >= 0) {
+      read_bytes += res;
+    }
+    sys_time now = SYS_get_time_ms();
+    if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) {
+      SPIFFS_clearerr(&fs);
+      res = 0;
+    }
+    (void)SPIFFS_close(&fs, fd);
+    sys_time ms = now-then;
+    int ms_int = now-then;
+    print("read %i bytes in %i ms, %i bytes/sec\n", read_bytes, ms_int, (1000*read_bytes)/ms_int);
+  } while (0);
+
+  print("benchmarked read [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
+
+  spiffs_locked = FALSE;
+  return (void *)res;
+}
+
+
+
+// ================= COMMON ==================
+
 
 static void *thr_spiffs_mount(void *arg) {
   (void)arg;
@@ -514,35 +620,6 @@ static void *thr_spiffs_copy(void *v_spiffs_arg) {
   } while (0);
 
   print("SPIFFS copy [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
-}
-
-static void *thr_spiffs_timedread(void *v_spiffs_arg) {
-  struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
-  s32_t res = 0;
-  do {
-    spiffs_file fd = SPIFFS_open(&fs, arg->fname, SPIFFS_O_RDONLY, 0);
-    if (fd < 0) {
-      print("Could not open %s\n", arg->fname);
-      break;
-    }
-    sys_time then = SYS_get_time_ms();
-    u32_t read_bytes = 0;
-    while ((res = SPIFFS_read(&fs, fd, generic_buffer, sizeof(generic_buffer))) >= 0) {
-      read_bytes += res;
-    }
-    sys_time now = SYS_get_time_ms();
-    if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) {
-      SPIFFS_clearerr(&fs);
-      res = 0;
-    }
-    (void)SPIFFS_close(&fs, fd);
-    sys_time ms = now-then;
-    int ms_int = now-then;
-    print("read %i bytes in %i ms, %i bytes/sec\n", read_bytes, ms_int, (1000*read_bytes)/ms_int);
-  } while (0);
-
   spiffs_locked = FALSE;
   return (void *)res;
 }
@@ -888,6 +965,22 @@ static s32_t cli_call_spiffs_generic(void *fn) {
   return 0;
 }
 
+// CLI STUFF
+
+// ================== BENCH ===================
+
+static s32_t cli_spiffs_timedread(u32_t argc, char *fname, u32_t chunksize) {
+  if (argc < 1) return -2;
+  if (argc < 2) chunksize = 1024;
+  memcpy(spiffs_arg.fname, fname, SPIFFS_OBJ_NAME_LEN);
+  spiffs_arg.chunksize = chunksize;
+  return cli_call_spiffs_generic(thr_spiffs_timedread);
+}
+
+
+
+// ================= COMMON ==================
+
 static s32_t cli_spiffs_mount(u32_t argc) {
   return cli_call_spiffs_generic(thr_spiffs_mount);
 }
@@ -1029,13 +1122,6 @@ static s32_t cli_spiffs_copy(u32_t argc, char *fname_src, char *fname_dst) {
   return cli_call_spiffs_generic(thr_spiffs_copy);
 }
 
-static s32_t cli_spiffs_timedread(u32_t argc, char *fname) {
-  if (argc < 1) return -2;
-  memcpy(spiffs_arg.fname, fname, SPIFFS_OBJ_NAME_LEN);
-  return cli_call_spiffs_generic(thr_spiffs_timedread);
-}
-
-
 static s32_t cli_spiffs_gc(u32_t argc, u32_t bytes) {
   if (argc < 1) return -2;
   spiffs_arg.data_len = bytes;
@@ -1092,7 +1178,13 @@ static s32_t cli_spiffs_dbg(u32_t argc,  ...) {
 
 CLI_EXTERN_MENU(common)
 
+CLI_MENU_START(bench)
+CLI_FUNC("timedrd", cli_spiffs_timedread, "Reads all file, timing it\ntimedrd <name> (<chunksize>)\n")
+CLI_MENU_END
+
+
 CLI_MENU_START(spiffs)
+CLI_SUBMENU(bench, "bench", "SUBMENU: benchmark tests")
 CLI_FUNC("mount", cli_spiffs_mount, "Mount\n")
 CLI_FUNC("unmount", cli_spiffs_unmount, "Unmount\n")
 CLI_FUNC("format", cli_spiffs_format, "Format\n")
@@ -1110,7 +1202,6 @@ CLI_FUNC("tell", cli_spiffs_tell, "Returns offset of filedescriptor\ntell <filed
 CLI_FUNC("rm", cli_spiffs_remove, "Removes file\nrm <name>\n")
 CLI_FUNC("mv", cli_spiffs_rename, "Renames file\nmv <oldname> <newname>\n")
 CLI_FUNC("cp", cli_spiffs_copy, "Copies file\ncp <srcname> <dstname>\n")
-CLI_FUNC("timedrd", cli_spiffs_timedread, "Reads all file, timing it\ntimedrd <name>\n")
 CLI_FUNC("gc", cli_spiffs_gc, "Performs a garbage collection\ngc <num bytes to free>\n")
 CLI_FUNC("vis", cli_spiffs_vis, "Debug dump FS\n")
 CLI_FUNC("dbg", cli_spiffs_dbg, "Enable disable fs debug\n"
