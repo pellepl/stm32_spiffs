@@ -16,6 +16,7 @@
 #include "rtc.h"
 #include "spi_flash_m25p16.h"
 #include "spiffs.h"
+#include "spiffs_nucleus.h"
 #include "spiffs_config.h"
 #include "spi_dev.h"
 #include "os.h"
@@ -30,11 +31,11 @@ volatile bool spiflash_busy;
 volatile s32_t spiflash_result;
 //static os_mutex spiffs_mutex;
 static volatile bool spiffs_locked;
-static u32_t spiffs_stack[256];
+static u32_t spiffs_stack[512];
 static os_thread spiffs_thread;
 static os_cond spiffs_cond;
-static u8_t spiffs_fd[32*8];
-static u8_t spiffs_cache[32+(32+SPIFFS_CFG_LOG_PAGE_SZ()*8)];
+static u8_t spiffs_fd_buf[32*8];
+static u8_t spiffs_cache_buf[32+(32+SPIFFS_CFG_LOG_PAGE_SZ()*8)];
 static u8_t spiffs_work[SPIFFS_CFG_LOG_PAGE_SZ()*2];
 
 bool _spiffs_dbg_generic = FALSE;
@@ -56,6 +57,7 @@ static struct spiffs_arg_s {
   u32_t chunksize;
   s32_t offs;
   bool time_per_chunk;
+  u32_t iterations;
 } spiffs_arg;
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -123,6 +125,26 @@ static const char *spiffs_errstr(s32_t err) {
   case SPIFFS_ERR_NAME_TOO_LONG         :return " name too long";
   default                               :return " <unknown>";
   }
+}
+
+static u32_t count_bits(u32_t i) {
+  i = i - ((i >> 1) & 0x55555555);
+  i = (i & 0x33333333) + ((i >> 2) & 0x33333333);
+  return (((i + (i >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
+}
+
+static u32_t count_open_fds(spiffs *fs) {
+  spiffs_fd *fds = (spiffs_fd *)fs->fd_space;
+  u32_t i;
+  u32_t cnt = 0;
+  for (i = 0; i < fs->fd_count; i++) {
+    spiffs_fd *fd = &fds[i];
+    if (fd->file_nbr != 0) {
+      cnt++;
+    }
+  }
+
+  return cnt;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -246,8 +268,8 @@ static s32_t _spiffs_mount(void) {
   if ((res = SPIFFS_mount(&fs,
       &cfg,
       spiffs_work,
-      spiffs_fd, sizeof(spiffs_fd),
-      spiffs_cache, sizeof(spiffs_cache),
+      spiffs_fd_buf, sizeof(spiffs_fd_buf),
+      spiffs_cache_buf, sizeof(spiffs_cache_buf),
       _spiffs_check_cb_f)) != SPIFFS_OK &&
       SPIFFS_errno(&fs) == SPIFFS_ERR_NOT_A_FS) {
     print("formatting spiffs...\n");
@@ -260,8 +282,8 @@ static s32_t _spiffs_mount(void) {
     res = SPIFFS_mount(&fs,
           &cfg,
           spiffs_work,
-          spiffs_fd, sizeof(spiffs_fd),
-          spiffs_cache, sizeof(spiffs_cache),
+          spiffs_fd_buf, sizeof(spiffs_fd_buf),
+          spiffs_cache_buf, sizeof(spiffs_cache_buf),
           _spiffs_check_cb_f);
   }
   if (res != SPIFFS_OK) {
@@ -388,6 +410,59 @@ static void *thr_bench_timedread(void *v_spiffs_arg) {
   return (void *)res;
 }
 
+static void *thr_bench_httpservmodel(void *v_spiffs_arg) {
+  s32_t res = SPIFFS_OK;
+  struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
+  u32_t iter = arg->iterations;
+  char fnames[8][SPIFFS_OBJ_NAME_LEN];
+  u32_t files = 0;
+  do {
+    spiffs_DIR d;
+    struct spiffs_dirent e;
+    struct spiffs_dirent *pe = &e;
+
+    SPIFFS_opendir(&fs, "", &d);
+    while ((pe = SPIFFS_readdir(&d, pe))) {
+      strcpy(fnames[files++], pe->name);
+      if (files >= 8) {
+        break;
+      }
+    }
+    SPIFFS_closedir(&d);
+
+    if (files < 2) {
+      print("too few files to run test\n");
+      break;
+    }
+    print("http server model test, %i files, %i iterations..\n", files, iter);
+
+    rand_seed(0x90817263);
+    sys_time then = SYS_get_time_ms();
+    while (iter--) {
+      spiffs_file fd;
+      u32_t file_ix = (rand_next() % (files - 1)) + 1;
+
+      fd = SPIFFS_open(&fs, fnames[file_ix], SPIFFS_O_RDONLY, 0);
+      if (fd <= SPIFFS_OK) break;
+      SPIFFS_close(fd);
+
+      fd = SPIFFS_open(&fs, fnames[0], SPIFFS_O_RDONLY, 0);
+      if (fd <= SPIFFS_OK) break;
+      SPIFFS_close(fd);
+    }
+    sys_time now = SYS_get_time_ms();
+    sys_time elapsed = now-then;
+    print("http server model %i iterations in %i ms, %i files\n",
+        arg->iterations, (int)elapsed, files);
+  } while (0);
+
+  print("benchmarked http server model [%i%s]\n", SPIFFS_errno(&fs),
+      spiffs_errstr(SPIFFS_errno(&fs)));
+
+  spiffs_locked = FALSE;
+  return (void *)res;
+}
+
 
 
 // ================= COMMON ==================
@@ -449,6 +524,15 @@ static void *thr_spiffs_ls(void *arg) {
   print("free :%6i [%4i kB]\n", total - used, (total - used)/1024);
   print("total:%6i [%4i kB]\n", total, total/1024);
 
+  print("\n");
+
+  print("num file descr.:%i (used %i)\n",
+      fs.fd_count,
+      count_open_fds(&fs)
+      );
+  print("num cache pages:%i (used %i)\n",
+      spiffs_get_cache(&fs)->cpage_count,
+      count_bits(spiffs_get_cache(&fs)->cpage_use_mask & spiffs_get_cache(&fs)->cpage_use_map));
   spiffs_locked = FALSE;
   return (void *)0;
 }
@@ -1007,6 +1091,12 @@ static s32_t cli_bench_timedwrite(u32_t argc, char *fname, u32_t len, u32_t chun
   return cli_call_spiffs_generic(thr_bench_timedwrite);
 }
 
+static s32_t cli_bench_httpservmodel(u32_t argc, u32_t iter) {
+  if (argc < 1) iter = 1000;
+  spiffs_arg.iterations = iter;
+  return cli_call_spiffs_generic(thr_bench_httpservmodel);
+}
+
 
 
 // ================= COMMON ==================
@@ -1213,6 +1303,8 @@ CLI_FUNC("timedrd", cli_bench_timedread,
     "Reads all file, timing it\ntimedrd <name> (<chunksize>) (<report_time_per_chunk>)\n")
 CLI_FUNC("timedwr", cli_bench_timedwrite,
     "Writes a file, timing it\ntimedwr <name> <len> (<chunksize>) (<report_time_per_chunk>)\n")
+CLI_FUNC("httpservmodel", cli_bench_httpservmodel,
+    "Timing http server model\nhttpservmodel <iterations>\n")
 CLI_MENU_END
 
 
