@@ -444,11 +444,11 @@ static void *thr_bench_httpservmodel(void *v_spiffs_arg) {
 
       fd = SPIFFS_open(&fs, fnames[file_ix], SPIFFS_O_RDONLY, 0);
       if (fd <= SPIFFS_OK) break;
-      SPIFFS_close(fd);
+      SPIFFS_close(&fs, fd);
 
       fd = SPIFFS_open(&fs, fnames[0], SPIFFS_O_RDONLY, 0);
       if (fd <= SPIFFS_OK) break;
-      SPIFFS_close(fd);
+      SPIFFS_close(&fs, fd);
     }
     sys_time now = SYS_get_time_ms();
     sys_time elapsed = now-then;
