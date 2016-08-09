@@ -199,7 +199,7 @@ typedef u16_t system_counter_type;
 #define UART2_SPEED 460800
 #define UART1_SPEED 921600
 
-#define USE_COLOR_CODING
+//#define USE_COLOR_CODING
 
 /** IO **/
 #define CONFIG_IO_MAX   1

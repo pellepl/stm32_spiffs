@@ -339,7 +339,7 @@ static void *thr_bench_timedwrite(void *v_spiffs_arg) {
 
   sys_time elapsed = 0;
   u32_t written = 0;
-  sys_time mark_prev = SYS_get_time_ms();
+  sys_time mark_prev = SYS_get_tick();
   sys_time then = mark_prev;
   while (written < len) {
     u32_t len2write = MIN(len - written, chunksize);
@@ -348,13 +348,14 @@ static void *thr_bench_timedwrite(void *v_spiffs_arg) {
       break;
     }
     if (arg->time_per_chunk) {
-      sys_time mark_cur = SYS_get_time_ms();
-      print(".. %i bytes, delta %i ms\n", written, (int)(mark_cur - mark_prev));
-      mark_prev = SYS_get_time_ms();
+      sys_time mark_cur = SYS_get_tick();
+      print(".. %i bytes, delta %i ms\n", written, (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
+      print("<SIMTRIG|graph:write,%i>\n", (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
+      mark_prev = SYS_get_tick();
     }
    written += len2write;
   }
-  sys_time now = SYS_get_time_ms();
+  sys_time now = SYS_get_tick();
   elapsed = now - then;
 
   res = SPIFFS_close(&fs, fd);
@@ -383,17 +384,18 @@ static void *thr_bench_timedread(void *v_spiffs_arg) {
     }
     print("Timed read of %s, chunk size %i...\n", arg->fname, chunksize);
     u32_t read_bytes = 0;
-    sys_time mark_prev = SYS_get_time_ms();
+    sys_time mark_prev = SYS_get_tick();
     sys_time then = mark_prev;
     while ((res = SPIFFS_read(&fs, fd, generic_buffer, chunksize)) >= 0) {
       read_bytes += res;
       if (arg->time_per_chunk) {
-        sys_time mark_cur = SYS_get_time_ms();
-        print(".. %i bytes, delta %i ms\n", read_bytes, (int)(mark_cur - mark_prev));
-        mark_prev = SYS_get_time_ms();
+        sys_time mark_cur = SYS_get_tick();
+        print(".. %i bytes, delta %i ms\n", read_bytes, (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
+        print("<SIMTRIG|graph:read,%i>\n", (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
+        mark_prev = SYS_get_tick();
       }
     }
-    sys_time now = SYS_get_time_ms();
+    sys_time now = SYS_get_tick();
     if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) {
       SPIFFS_clearerr(&fs);
       res = 0;
@@ -401,7 +403,7 @@ static void *thr_bench_timedread(void *v_spiffs_arg) {
     (void)SPIFFS_close(&fs, fd);
     sys_time elapsed = now-then;
     print("read %i bytes in %i ms, %i bytes/sec\n",
-        read_bytes, (int)elapsed, (1000*read_bytes)/(int)elapsed);
+        read_bytes, (int)RTC_TICK_TO_MS(elapsed), (1000*read_bytes)/(int)elapsed);
   } while (0);
 
   print("benchmarked read [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
@@ -437,7 +439,7 @@ static void *thr_bench_httpservmodel(void *v_spiffs_arg) {
     print("http server model test, %i files, %i iterations..\n", files, iter);
 
     rand_seed(0x90817263);
-    sys_time then = SYS_get_time_ms();
+    sys_time then = SYS_get_tick();
     while (iter--) {
       spiffs_file fd;
       u32_t file_ix = (rand_next() % (files - 1)) + 1;
@@ -450,10 +452,10 @@ static void *thr_bench_httpservmodel(void *v_spiffs_arg) {
       if (fd <= SPIFFS_OK) break;
       SPIFFS_close(&fs, fd);
     }
-    sys_time now = SYS_get_time_ms();
+    sys_time now = SYS_get_tick();
     sys_time elapsed = now-then;
     print("http server model %i iterations in %i ms, %i files\n",
-        arg->iterations, (int)elapsed, files);
+        arg->iterations, (int)RTC_TICK_TO_MS(elapsed), files);
   } while (0);
 
   print("benchmarked http server model [%i%s]\n", SPIFFS_errno(&fs),
