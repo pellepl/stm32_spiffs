@@ -16,11 +16,25 @@
 #include "rtc.h"
 #include "spi_flash_m25p16.h"
 #include "spiffs.h"
-#include "spiffs_nucleus.h"
 #include "spiffs_config.h"
+#include "spiffs_nucleus.h"
 #include "spi_dev.h"
 #include "os.h"
+#include "precise_clock.h"
 #include <stdarg.h>
+
+#define EMPTY_STACK_FILL              (0xeaeaeaea) // from os.c
+
+#define SPIFFS_THREAD_CODA(func) \
+    print("%s [%i%s]\n", (func), SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs))); \
+    print("stack usage: %i bytes\n", count_used_spiffs_stack()); \
+    if (graphs_enabled) { \
+      print("<SIMTRIG|graphlabel:Stack usage,%s>\n", (func)); \
+      print("<SIMTRIG|graph:Stack usage,%i>\n", count_used_spiffs_stack()); \
+    } \
+    spiffs_locked = FALSE; \
+    return (void *)res;
+
 
 static volatile u8_t cpu_claims;
 static u8_t cli_buf[16];
@@ -35,8 +49,8 @@ static u32_t spiffs_stack[512];
 static os_thread spiffs_thread;
 static os_cond spiffs_cond;
 static u8_t spiffs_fd_buf[32*8];
-static u8_t spiffs_cache_buf[32+(32+SPIFFS_CFG_LOG_PAGE_SZ()*8)];
-static u8_t spiffs_work[SPIFFS_CFG_LOG_PAGE_SZ()*2];
+static u8_t spiffs_cache_buf[32+(32+CFG_LOG_PAGE_SZ*8)];
+static u8_t spiffs_work[CFG_LOG_PAGE_SZ*2];
 
 bool _spiffs_dbg_generic = FALSE;
 bool _spiffs_dbg_cache = FALSE;
@@ -44,6 +58,9 @@ bool _spiffs_dbg_gc = FALSE;
 bool _spiffs_dbg_check = FALSE;
 
 static u8_t generic_buffer[1024];
+
+static int graphs_enabled = FALSE;
+static u32_t graph_nbr = 0;
 
 static struct spiffs_arg_s {
   char fname[SPIFFS_OBJ_NAME_LEN];
@@ -58,7 +75,10 @@ static struct spiffs_arg_s {
   s32_t offs;
   bool time_per_chunk;
   u32_t iterations;
+  spiffs_page_ix pix;
 } spiffs_arg;
+
+static u32_t count_used_spiffs_stack(void);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -123,15 +143,22 @@ static const char *spiffs_errstr(s32_t err) {
   case SPIFFS_ERR_PROBE_TOO_FEW_BLOCKS  :return " probe too few blocks";
   case SPIFFS_ERR_PROBE_NOT_A_FS        :return " probe not a fs";
   case SPIFFS_ERR_NAME_TOO_LONG         :return " name too long";
+
+  case SPIFFS_ERR_IX_MAP_UNMAPPED       :return " ix map unmapped";
+  case SPIFFS_ERR_IX_MAP_MAPPED         :return " ix map mapped";
+  case SPIFFS_ERR_IX_MAP_BAD_RANGE      :return " ix map bad range";
+
   default                               :return " <unknown>";
   }
 }
 
+#if SPIFFS_CACHE
 static u32_t count_bits(u32_t i) {
   i = i - ((i >> 1) & 0x55555555);
   i = (i & 0x33333333) + ((i >> 2) & 0x33333333);
   return (((i + (i >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
 }
+#endif
 
 static u32_t count_open_fds(spiffs *fs) {
   spiffs_fd *fds = (spiffs_fd *)fs->fd_space;
@@ -149,7 +176,11 @@ static u32_t count_open_fds(spiffs *fs) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+#if SPIFFS_HAL_CALLBACK_EXTRA
+static s32_t _spiffs_erase(spiffs *fs, u32_t addr, u32_t len) {
+#else
 static s32_t _spiffs_erase(u32_t addr, u32_t len) {
+#endif
   int res;
   gpio_enable(PIN_LED4);
   WDOG_feed();
@@ -163,7 +194,11 @@ static s32_t _spiffs_erase(u32_t addr, u32_t len) {
   return res;
 }
 
+#if SPIFFS_HAL_CALLBACK_EXTRA
+static s32_t _spiffs_read(spiffs *fs, u32_t addr, u32_t size, u8_t *dst) {
+#else
 static s32_t _spiffs_read(u32_t addr, u32_t size, u8_t *dst) {
+#endif
   int res;
   gpio_enable(PIN_LED2);
   spiflash_busy = TRUE;
@@ -176,7 +211,11 @@ static s32_t _spiffs_read(u32_t addr, u32_t size, u8_t *dst) {
   return res;
 }
 
+#if SPIFFS_HAL_CALLBACK_EXTRA
+static s32_t _spiffs_write(spiffs *fs, u32_t addr, u32_t size, u8_t *src) {
+#else
 static s32_t _spiffs_write(u32_t addr, u32_t size, u8_t *src) {
+#endif
   int res;
   gpio_enable(PIN_LED3);
   spiflash_busy = TRUE;
@@ -203,7 +242,11 @@ static s32_t _spiffs_open_spiflash(void) {
 }
 
 static u32_t old_perc = 999;
+#if SPIFFS_HAL_CALLBACK_EXTRA
+static void _spiffs_check_cb_f(spiffs *fs, spiffs_check_type type, spiffs_check_report report,
+#else
 static void _spiffs_check_cb_f(spiffs_check_type type, spiffs_check_report report,
+#endif
     u32_t arg1, u32_t arg2) {
   u32_t perc = arg1 * 100 / 256;
   if (report == SPIFFS_CHECK_PROGRESS && old_perc != perc) {
@@ -264,6 +307,16 @@ static s32_t _spiffs_mount(void) {
   cfg.hal_erase_f = _spiffs_erase;
   cfg.hal_read_f = _spiffs_read;
   cfg.hal_write_f = _spiffs_write;
+#if SPIFFS_SINGLETON == 0
+  cfg.phys_size = CFG_PHYS_SZ;
+  cfg.phys_addr = CFG_PHYS_ADDR;
+  cfg.phys_erase_block = CFG_PHYS_ERASE_SZ;
+  cfg.log_block_size = CFG_LOG_BLOCK_SZ;
+  cfg.log_page_size = CFG_LOG_PAGE_SZ;
+#if SPIFFS_FILEHDL_OFFSET
+  cfg.fh_ix_offset = 1000;
+#endif
+#endif
   print("mounting\n");
   if ((res = SPIFFS_mount(&fs,
       &cfg,
@@ -337,6 +390,12 @@ static void *thr_bench_timedwrite(void *v_spiffs_arg) {
     generic_buffer[i] = (rnd>>16) ^ (rnd>>8) ^ rnd;
   }
 
+  if (arg->time_per_chunk) {
+    graph_nbr++;
+    print("<SIMTRIG|graphtitle:w%i,Timed write (chunksize:%i length:%i)>\n",
+          graph_nbr, chunksize, len);
+  }
+
   sys_time elapsed = 0;
   u32_t written = 0;
   sys_time mark_prev = SYS_get_tick();
@@ -350,7 +409,8 @@ static void *thr_bench_timedwrite(void *v_spiffs_arg) {
     if (arg->time_per_chunk) {
       sys_time mark_cur = SYS_get_tick();
       print(".. %i bytes, delta %i ms\n", written, (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
-      print("<SIMTRIG|graph:write,%i>\n", (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
+      print("<SIMTRIG|graph:w%i,%i>\n",
+            graph_nbr, (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
       mark_prev = SYS_get_tick();
     }
    written += len2write;
@@ -366,9 +426,9 @@ static void *thr_bench_timedwrite(void *v_spiffs_arg) {
   print("benchmarked write [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
 final:
 
- spiffs_locked = FALSE;
- return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS bench timedwrite");
 }
+
 
 static void *thr_bench_timedread(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
@@ -383,16 +443,26 @@ static void *thr_bench_timedread(void *v_spiffs_arg) {
       break;
     }
     print("Timed read of %s, chunk size %i...\n", arg->fname, chunksize);
+    if (arg->time_per_chunk) {
+      graph_nbr++;
+      spiffs_stat s;
+      SPIFFS_stat(&fs, arg->fname, &s);
+      print("<SIMTRIG|graphtitle:r%i,Timed read [ticks] (chunksize:%i length:%i)>\n",
+            graph_nbr, chunksize, s.size);
+    }
+
+
     u32_t read_bytes = 0;
-    sys_time mark_prev = SYS_get_tick();
-    sys_time then = mark_prev;
+    sys_time then = SYS_get_tick();
+    sys_time mark_prev = PC_get_timer();
     while ((res = SPIFFS_read(&fs, fd, generic_buffer, chunksize)) >= 0) {
       read_bytes += res;
       if (arg->time_per_chunk) {
-        sys_time mark_cur = SYS_get_tick();
-        print(".. %i bytes, delta %i ms\n", read_bytes, (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
-        print("<SIMTRIG|graph:read,%i>\n", (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
-        mark_prev = SYS_get_tick();
+        sys_time mark_cur = PC_get_timer();
+        print(".. %i bytes, delta %i ticks\n", read_bytes, (int)(mark_cur - mark_prev));
+        print("<SIMTRIG|graph:r%i,%i>\n",
+              graph_nbr, (int)RTC_TICK_TO_MS(mark_cur - mark_prev));
+        mark_prev = PC_get_timer();
       }
     }
     sys_time now = SYS_get_tick();
@@ -408,9 +478,9 @@ static void *thr_bench_timedread(void *v_spiffs_arg) {
 
   print("benchmarked read [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
 
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS bench timedread");
 }
+
 
 static void *thr_bench_httpservmodel(void *v_spiffs_arg) {
   s32_t res = SPIFFS_OK;
@@ -425,7 +495,7 @@ static void *thr_bench_httpservmodel(void *v_spiffs_arg) {
 
     SPIFFS_opendir(&fs, "", &d);
     while ((pe = SPIFFS_readdir(&d, pe))) {
-      strcpy(fnames[files++], pe->name);
+      strcpy(fnames[files++], (char *)pe->name);
       if (files >= 8) {
         break;
       }
@@ -461,8 +531,55 @@ static void *thr_bench_httpservmodel(void *v_spiffs_arg) {
   print("benchmarked http server model [%i%s]\n", SPIFFS_errno(&fs),
       spiffs_errstr(SPIFFS_errno(&fs)));
 
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS bench httpservermodel");
+}
+
+
+static void *thr_bench_timedread_chunks(void *v_spiffs_arg) {
+  struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
+  u32_t chunksize = sizeof(generic_buffer);
+  s32_t res = SPIFFS_OK;
+
+  spiffs_stat s;
+  SPIFFS_stat(&fs, arg->fname, &s);
+  print("<SIMTRIG|graphtitle:rc%i,Timed read chunksizes (length:%i)>\n",
+        graph_nbr, s.size);
+  do {
+    spiffs_file fd = SPIFFS_open(&fs, arg->fname, SPIFFS_O_RDONLY, 0);
+    if (fd < 0) {
+      print("Could not open %s\n", arg->fname);
+      break;
+    }
+
+
+    u32_t read_bytes = 0;
+    sys_time mark_prev = SYS_get_tick();
+    sys_time then = mark_prev;
+    while ((res = SPIFFS_read(&fs, fd, generic_buffer, chunksize)) >= 0) {
+      read_bytes += res;
+    }
+    sys_time now = SYS_get_tick();
+    if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) {
+      SPIFFS_clearerr(&fs);
+      res = SPIFFS_OK;
+    }
+    (void)SPIFFS_close(&fs, fd);
+    if (res != SPIFFS_OK) {
+      break;
+    }
+    sys_time elapsed = now-then;
+    print("read %i bytes in %i ms, %i bytes/sec\n",
+        read_bytes, (int)RTC_TICK_TO_MS(elapsed), (1000*read_bytes)/(int)elapsed);
+    print("<SIMTRIG|graphlabel:rc%i,%i>\n",
+          graph_nbr, chunksize);
+    print("<SIMTRIG|graph:rc%i,%i>\n",
+          graph_nbr, (int)RTC_TICK_TO_MS(elapsed));
+    chunksize /= 2;
+  } while (res == SPIFFS_OK && chunksize > 0);
+
+  print("benchmarked read chunksizes [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
+
+  SPIFFS_THREAD_CODA("SPIFFS bench read chunksizes");
 }
 
 
@@ -473,41 +590,36 @@ static void *thr_bench_httpservmodel(void *v_spiffs_arg) {
 static void *thr_spiffs_mount(void *arg) {
   (void)arg;
   s32_t res = _spiffs_mount();
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_mount");
 }
 
 static void *thr_spiffs_unmount(void *arg) {
   (void)arg;
   SPIFFS_unmount(&fs);
-  print("SPIFFS unmounted [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)0;
+  s32_t res = SPIFFS_OK;
+  SPIFFS_THREAD_CODA("SPIFFS_unmount");
 }
+
+#if SPIFFS_READ_ONLY == 0
 
 static void *thr_spiffs_format(void *arg) {
   (void)arg;
   SPIFFS_unmount(&fs);
   s32_t res = SPIFFS_format(&fs);
-  print("SPIFFS formatted [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  if (res == SPIFFS_OK) {
-    res = _spiffs_mount();
-  }
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_format");
 }
 
 static void *thr_spiffs_check(void *arg) {
   (void)arg;
   s32_t res = SPIFFS_check(&fs);
-  print("SPIFFS checked [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_check");
 }
+
+#endif
 
 static void *thr_spiffs_ls(void *arg) {
   (void)arg;
-
+  s32_t res = SPIFFS_OK;
   spiffs_DIR d;
   struct spiffs_dirent e;
   struct spiffs_dirent *pe = &e;
@@ -521,7 +633,7 @@ static void *thr_spiffs_ls(void *arg) {
   SPIFFS_closedir(&d);
 
   u32_t total, used;
-  (void)SPIFFS_info(&fs, &total, &used);
+  res = SPIFFS_info(&fs, &total, &used);
   print("used :%6i [%4i kB]\n", used, used/1024);
   print("free :%6i [%4i kB]\n", total - used, (total - used)/1024);
   print("total:%6i [%4i kB]\n", total, total/1024);
@@ -532,18 +644,19 @@ static void *thr_spiffs_ls(void *arg) {
       fs.fd_count,
       count_open_fds(&fs)
       );
+#if SPIFFS_CACHE
   print("num cache pages:%i (used %i)\n",
       spiffs_get_cache(&fs)->cpage_count,
       count_bits(spiffs_get_cache(&fs)->cpage_use_mask & spiffs_get_cache(&fs)->cpage_use_map));
-  spiffs_locked = FALSE;
-  return (void *)0;
+#endif
+  SPIFFS_THREAD_CODA("SPIFFS_ls");
 }
 
 static void *thr_spiffs_lesshex(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   spiffs_file fd = -1;
   u32_t offs = 0;
-  s32_t res;
+  s32_t res = SPIFFS_OK;
   do {
     u8_t buf[16];
     fd = SPIFFS_open(&fs, arg->fname, SPIFFS_O_RDONLY, 0);
@@ -583,27 +696,27 @@ static void *thr_spiffs_lesshex(void *v_spiffs_arg) {
   }
   if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) SPIFFS_clearerr(&fs);
 
-  print("SPIFFS read %s [%i%s]\n", arg->fname, SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-
-  spiffs_locked = FALSE;
-  return (void *)0;
+  SPIFFS_THREAD_CODA("SPIFFS lesshex");
 }
 
 static void *thr_spiffs_open(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   s32_t res = SPIFFS_open(&fs, arg->fname, arg->flags, 0);
   if (res >= 0) print("fd %i opened\n", res);
-  print("SPIFFS open [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_open");
+}
+
+static void *thr_spiffs_open_by_page(void *v_spiffs_arg) {
+  struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
+  s32_t res = SPIFFS_open_by_page(&fs, arg->pix, arg->flags, 0);
+  if (res >= 0) print("fd %i opened\n", res);
+  SPIFFS_THREAD_CODA("SPIFFS_open_by_page");
 }
 
 static void *thr_spiffs_close(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   s32_t res = SPIFFS_close(&fs, arg->fd);
-  print("SPIFFS close [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_close");
 }
 
 static void *thr_spiffs_read(void *v_spiffs_arg) {
@@ -634,17 +747,15 @@ static void *thr_spiffs_read(void *v_spiffs_arg) {
 
   if (SPIFFS_errno(&fs) == SPIFFS_ERR_END_OF_OBJECT) SPIFFS_clearerr(&fs);
 
-  print("SPIFFS read %i of %i [%i%s]\n", rlen, arg->data_len, SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_read");
 }
+
+#if SPIFFS_READ_ONLY == 0
 
 static void *thr_spiffs_write(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   s32_t res = SPIFFS_write(&fs, arg->fd, arg->data, arg->data_len);
-  print("SPIFFS write %i of %i [%i%s]\n", res, arg->data_len, SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_write");
 }
 
 static void *thr_spiffs_write_mem(void *v_spiffs_arg) {
@@ -655,12 +766,12 @@ static void *thr_spiffs_write_mem(void *v_spiffs_arg) {
   return (void *)res;
 }
 
+#endif
+
 static void *thr_spiffs_seek(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   s32_t res = SPIFFS_lseek(&fs, arg->fd, arg->flags, arg->offs);
-  print("SPIFFS lseek [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_lseek");
 }
 
 static void *thr_spiffs_tell(void *v_spiffs_arg) {
@@ -669,25 +780,49 @@ static void *thr_spiffs_tell(void *v_spiffs_arg) {
   if (res >= 0) {
     print("offset %i\n", res);
   }
-  print("SPIFFS tell [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_tell");
 }
+
+#if SPIFFS_READ_ONLY == 0
 
 static void *thr_spiffs_remove(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   s32_t res = SPIFFS_remove(&fs, arg->fname);
-  print("SPIFFS remove [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_remove");
+}
+
+static void *thr_spiffs_remove_filter(void *v_spiffs_arg) {
+  struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
+  s32_t res = SPIFFS_OK;
+  spiffs_DIR d;
+  struct spiffs_dirent e;
+  struct spiffs_dirent *pe = &e;
+
+  SPIFFS_opendir(&fs, "/", &d);
+  print("  OBJID   SIZE    NAME\n");
+  while ((pe = SPIFFS_readdir(&d, pe))) {
+    if (strstr((char *)pe->name, arg->fname)) {
+      print("removing %s.. ", pe->name);
+      spiffs_file fd = SPIFFS_open_by_dirent(&fs, pe, SPIFFS_O_RDWR, 0);
+      if (fd > SPIFFS_OK) {
+        res = SPIFFS_fremove(&fs, fd);
+        if (res == SPIFFS_OK) {
+          print("OK\n");
+        } else {
+          print("FAIL [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
+        }
+      }
+    }
+  }
+  print("\n");
+  SPIFFS_closedir(&d);
+  SPIFFS_THREAD_CODA("SPIFFS_remove_filter");
 }
 
 static void *thr_spiffs_rename(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   s32_t res = SPIFFS_rename(&fs, arg->fname, arg->fname_new);
-  print("SPIFFS rename [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_rename");
 }
 
 static void *thr_spiffs_copy(void *v_spiffs_arg) {
@@ -721,24 +856,27 @@ static void *thr_spiffs_copy(void *v_spiffs_arg) {
     res = SPIFFS_close(&fs, fd_dst);
   } while (0);
 
-  print("SPIFFS copy [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS copy");
 }
 
 static void *thr_spiffs_gc(void *v_spiffs_arg) {
   struct spiffs_arg_s *arg = (struct spiffs_arg_s *)v_spiffs_arg;
   s32_t res = SPIFFS_gc(&fs, arg->data_len);
-  print("SPIFFS gc [%i%s]\n", SPIFFS_errno(&fs), spiffs_errstr(SPIFFS_errno(&fs)));
-  spiffs_locked = FALSE;
-  return (void *)res;
+  SPIFFS_THREAD_CODA("SPIFFS_gc");
 }
+
+static void *thr_spiffs_gc_quick(void *v_spiffs_arg) {
+  (void)v_spiffs_arg;
+  s32_t res = SPIFFS_gc_quick(&fs, 0);
+  SPIFFS_THREAD_CODA("SPIFFS_gc_quick");
+}
+
+#endif
 
 static void *thr_spiffs_vis(void *arg) {
   (void)arg;
-  SPIFFS_vis(&fs);
-  spiffs_locked = FALSE;
-  return (void *)0;
+  s32_t res = SPIFFS_vis(&fs);
+  SPIFFS_THREAD_CODA("SPIFFS_vis");
 }
 
 
@@ -923,6 +1061,7 @@ static void spif_cb_rd(spi_flash_dev *d, int res) {
 }
 
 void APP_init(void) {
+  PC_init();
   WDOG_start(APP_WDOG_TIMEOUT_S);
 
   if (PWR_GetFlagStatus(PWR_FLAG_WU) == SET) {
@@ -1036,6 +1175,10 @@ static s32_t cli_info(u32_t argc) {
       "RTCCNT:%016llx\n"
       "RTCALR:%016llx\n",
       RTC_get_tick(), RTC_get_alarm_tick());
+
+  print(
+      "PRCCLK:%016llx\n",
+      PC_get_timer());
   return CLI_OK;
 }
 
@@ -1052,6 +1195,11 @@ static s32_t cli_call_spiffs_generic(void *fn) {
   if (!spiffs_locked) {
     spiffs_locked = TRUE;
 
+    int i;
+    for (i = 0; i < sizeof(spiffs_stack)/sizeof(spiffs_stack[0]); i++) {
+      spiffs_stack[i] = EMPTY_STACK_FILL;
+    }
+
     SPIFFS_clearerr(&fs);
     OS_thread_create(
         &spiffs_thread,
@@ -1065,6 +1213,15 @@ static s32_t cli_call_spiffs_generic(void *fn) {
   }
   print("ERR: SPIFFS busy\n");
   return 0;
+}
+
+static u32_t count_used_spiffs_stack(void) {
+  u32_t *sp = &spiffs_stack[1];
+  u32_t count_free_32 = 0;
+  while (*sp++ == EMPTY_STACK_FILL) {
+    count_free_32++;
+  }
+  return sizeof(spiffs_stack) - (count_free_32 - 2) * sizeof(u32_t);
 }
 
 // CLI STUFF
@@ -1093,10 +1250,18 @@ static s32_t cli_bench_timedwrite(u32_t argc, char *fname, u32_t len, u32_t chun
   return cli_call_spiffs_generic(thr_bench_timedwrite);
 }
 
+
 static s32_t cli_bench_httpservmodel(u32_t argc, u32_t iter) {
   if (argc < 1) iter = 1000;
   spiffs_arg.iterations = iter;
   return cli_call_spiffs_generic(thr_bench_httpservmodel);
+}
+
+
+static s32_t cli_bench_timedread_chunks(u32_t argc, char *fname) {
+  if (argc < 1) return -2;
+  memcpy(spiffs_arg.fname, fname, SPIFFS_OBJ_NAME_LEN);
+  return cli_call_spiffs_generic(thr_bench_timedread_chunks);
 }
 
 
@@ -1111,13 +1276,21 @@ static s32_t cli_spiffs_unmount(u32_t argc) {
   return cli_call_spiffs_generic(thr_spiffs_unmount);
 }
 
+#if SPIFFS_READ_ONLY == 0
+
 static s32_t cli_spiffs_format(u32_t argc) {
+  if (SPIFFS_mounted(&fs)) {
+    print("unmount before format\n");
+    return 0;
+  }
   return cli_call_spiffs_generic(thr_spiffs_format);
 }
 
 static s32_t cli_spiffs_check(u32_t argc) {
   return cli_call_spiffs_generic(thr_spiffs_check);
 }
+
+#endif
 
 static s32_t cli_spiffs_ls(u32_t argc) {
   return cli_call_spiffs_generic(thr_spiffs_ls);
@@ -1137,6 +1310,28 @@ static s32_t cli_spiffs_hex(u32_t argc, char *fname) {
   return cli_call_spiffs_generic(thr_spiffs_lesshex);
 }
 
+void parse_flag(char *flag) {
+  if (strcmp("APPEND", flag) == 0) {
+    spiffs_arg.flags |= SPIFFS_O_APPEND;
+  } else if (strcmp("TRUNC", flag) == 0) {
+    spiffs_arg.flags |= SPIFFS_O_TRUNC;
+  } else if (strcmp("CREAT", flag) == 0) {
+    spiffs_arg.flags |= SPIFFS_O_CREAT;
+  } else if (strcmp("RDONLY", flag) == 0) {
+    spiffs_arg.flags |= SPIFFS_O_RDONLY;
+  } else if (strcmp("WRONLY", flag) == 0) {
+    spiffs_arg.flags |= SPIFFS_O_WRONLY;
+  } else if (strcmp("RDWR", flag) == 0) {
+    spiffs_arg.flags |= SPIFFS_O_RDWR;
+  } else if (strcmp("DIRECT", flag) == 0) {
+    spiffs_arg.flags |= SPIFFS_O_DIRECT;
+  } else if (strcmp("EXCL", flag) == 0) {
+    spiffs_arg.flags |= SPIFFS_O_EXCL;
+  } else {
+    print("warn: unknown flag %s\n", flag);
+  }
+}
+
 static s32_t cli_spiffs_open(u32_t argc, char *fname, ...) {
   if (argc < 1) return -2;
   memcpy(spiffs_arg.fname, fname, SPIFFS_OBJ_NAME_LEN);
@@ -1147,29 +1342,28 @@ static s32_t cli_spiffs_open(u32_t argc, char *fname, ...) {
   u32_t i;
   for (i = 0; i < argc -1; i++) {
     char *flag = va_arg(va, char *);
-    if (strcmp("APPEND", flag) == 0) {
-      spiffs_arg.flags |= SPIFFS_O_APPEND;
-    } else if (strcmp("TRUNC", flag) == 0) {
-      spiffs_arg.flags |= SPIFFS_O_TRUNC;
-    } else if (strcmp("CREAT", flag) == 0) {
-      spiffs_arg.flags |= SPIFFS_O_CREAT;
-    } else if (strcmp("RDONLY", flag) == 0) {
-      spiffs_arg.flags |= SPIFFS_O_RDONLY;
-    } else if (strcmp("WRONLY", flag) == 0) {
-      spiffs_arg.flags |= SPIFFS_O_WRONLY;
-    } else if (strcmp("RDWR", flag) == 0) {
-      spiffs_arg.flags |= SPIFFS_O_RDWR;
-    } else if (strcmp("DIRECT", flag) == 0) {
-      spiffs_arg.flags |= SPIFFS_O_DIRECT;
-    } else if (strcmp("EXCL", flag) == 0) {
-      spiffs_arg.flags |= SPIFFS_O_EXCL;
-    } else {
-      print("warn: unknown flag %s\n", flag);
-    }
+    parse_flag(flag);
   }
   va_end(va);
 
   return cli_call_spiffs_generic(thr_spiffs_open);
+}
+
+static s32_t cli_spiffs_open_by_page(u32_t argc, u32_t pix, ...) {
+  if (argc < 1) return -2;
+  spiffs_arg.pix = pix;
+  spiffs_arg.flags = 0;
+
+  va_list va;
+  va_start(va, pix);
+  u32_t i;
+  for (i = 0; i < argc -1; i++) {
+    char *flag = va_arg(va, char *);
+    parse_flag(flag);
+  }
+  va_end(va);
+
+  return cli_call_spiffs_generic(thr_spiffs_open_by_page);
 }
 
 static s32_t cli_spiffs_close(u32_t argc, spiffs_file fd) {
@@ -1185,11 +1379,13 @@ static s32_t cli_spiffs_read(u32_t argc, spiffs_file fd, u32_t len) {
   return cli_call_spiffs_generic(thr_spiffs_read);
 }
 
+#if SPIFFS_READ_ONLY == 0
+
 static s32_t cli_spiffs_write(u32_t argc, spiffs_file fd, char *data) {
   if (argc < 2) return -2;
   spiffs_arg.fd = fd;
-  strncpy(spiffs_arg.data, data, sizeof(spiffs_arg.data));
-  spiffs_arg.data_len = strlen(spiffs_arg.data);
+  strncpy((char *)spiffs_arg.data, data, sizeof(spiffs_arg.data));
+  spiffs_arg.data_len = strlen((char *)spiffs_arg.data);
   return cli_call_spiffs_generic(thr_spiffs_write);
 }
 
@@ -1200,6 +1396,8 @@ static s32_t cli_spiffs_write_mem(u32_t argc, spiffs_file fd, u8_t *data, u32_t 
   spiffs_arg.data_len = len;
   return cli_call_spiffs_generic(thr_spiffs_write_mem);
 }
+
+#endif
 
 static s32_t cli_spiffs_seek(u32_t argc, spiffs_file fd, char *whence_str, s32_t offs) {
   if (argc < 3) return -2;
@@ -1224,10 +1422,18 @@ static s32_t cli_spiffs_tell(u32_t argc, spiffs_file fd) {
   return cli_call_spiffs_generic(thr_spiffs_tell);
 }
 
+#if SPIFFS_READ_ONLY == 0
+
 static s32_t cli_spiffs_remove(u32_t argc, char *fname) {
   if (argc < 1) return -2;
   memcpy(spiffs_arg.fname, fname, SPIFFS_OBJ_NAME_LEN);
   return cli_call_spiffs_generic(thr_spiffs_remove);
+}
+
+static s32_t cli_spiffs_remove_filter(u32_t argc, char *fname) {
+  if (argc < 1) return -2;
+  memcpy(spiffs_arg.fname, fname, SPIFFS_OBJ_NAME_LEN);
+  return cli_call_spiffs_generic(thr_spiffs_remove_filter);
 }
 
 static s32_t cli_spiffs_rename(u32_t argc, char *fname_old, char *fname_new) {
@@ -1249,6 +1455,12 @@ static s32_t cli_spiffs_gc(u32_t argc, u32_t bytes) {
   spiffs_arg.data_len = bytes;
   return cli_call_spiffs_generic(thr_spiffs_gc);
 }
+
+static s32_t cli_spiffs_gc_quick(u32_t argc) {
+  return cli_call_spiffs_generic(thr_spiffs_gc_quick);
+}
+
+#endif
 
 static s32_t cli_spiffs_vis(u32_t argc) {
   return cli_call_spiffs_generic(thr_spiffs_vis);
@@ -1298,11 +1510,21 @@ static s32_t cli_spiffs_dbg(u32_t argc,  ...) {
   return 0;
 }
 
+static s32_t cli_spiffs_graph(u32_t argc,  char *onoroff) {
+  if (argc < 1) return CLI_ERR_PARAM;
+  graphs_enabled = (0 == strcmp("on", onoroff));
+  print("graphs enables : %s\n", graphs_enabled ? "on" : "off");
+
+  return 0;
+}
+
 CLI_EXTERN_MENU(common)
 
 CLI_MENU_START(bench)
 CLI_FUNC("timedrd", cli_bench_timedread,
     "Reads all file, timing it\ntimedrd <name> (<chunksize>) (<report_time_per_chunk>)\n")
+CLI_FUNC("timedrd_chunks", cli_bench_timedread_chunks,
+    "Reads all file with different chunksizes, timing it\ntimedrd_chunk <name>\n")
 CLI_FUNC("timedwr", cli_bench_timedwrite,
     "Writes a file, timing it\ntimedwr <name> <len> (<chunksize>) (<report_time_per_chunk>)\n")
 CLI_FUNC("httpservmodel", cli_bench_httpservmodel,
@@ -1314,25 +1536,36 @@ CLI_MENU_START(spiffs)
 CLI_SUBMENU(bench, "bench", "SUBMENU: benchmark tests")
 CLI_FUNC("mount", cli_spiffs_mount, "Mount\n")
 CLI_FUNC("unmount", cli_spiffs_unmount, "Unmount\n")
+#if SPIFFS_READ_ONLY == 0
 CLI_FUNC("format", cli_spiffs_format, "Format\n")
 CLI_FUNC("check", cli_spiffs_check, "Checks fs integrity\n")
+#endif
 CLI_FUNC("ls", cli_spiffs_ls, "Lists fs contents\n")
 CLI_FUNC("less", cli_spiffs_less, "Reads file as ascii\nless <name>")
 CLI_FUNC("hex", cli_spiffs_hex, "Reads file as hex data\nhex <name>")
 CLI_FUNC("open", cli_spiffs_open, "Opens a file\nopen <name> <APPEND | TRUNC | CREAT | RDONLY | WRONLY | RDWR | DIRECT | EXCL>*\n")
+CLI_FUNC("open_pix", cli_spiffs_open_by_page, "Opens a file by page\nopen_pix <pix> <APPEND | TRUNC | CREAT | RDONLY | WRONLY | RDWR | DIRECT | EXCL>*\n")
 CLI_FUNC("close", cli_spiffs_close, "Closes a file\nclose <filedescriptor>\n")
 CLI_FUNC("rd", cli_spiffs_read, "Reads from file\nrd <filedescriptor> <length>\n")
+#if SPIFFS_READ_ONLY == 0
 CLI_FUNC("wr", cli_spiffs_write, "Writes string to file\nwr <filedescriptor> <string>\n")
 CLI_FUNC("wrmem", cli_spiffs_write_mem, "Writes memory contents to file\nwr <filedescriptor> <address> <length>\n")
+#endif
 CLI_FUNC("seek", cli_spiffs_seek, "Seeks in file\nseek <filedescriptor> <SET | CUR | END> <offset>\n")
 CLI_FUNC("tell", cli_spiffs_tell, "Returns offset of filedescriptor\ntell <filedescriptor>\n")
+#if SPIFFS_READ_ONLY == 0
 CLI_FUNC("rm", cli_spiffs_remove, "Removes file\nrm <name>\n")
+CLI_FUNC("rm_filter", cli_spiffs_remove_filter, "Removes all files containing <filter>\nrm_filter <filter>\n")
 CLI_FUNC("mv", cli_spiffs_rename, "Renames file\nmv <oldname> <newname>\n")
 CLI_FUNC("cp", cli_spiffs_copy, "Copies file\ncp <srcname> <dstname>\n")
 CLI_FUNC("gc", cli_spiffs_gc, "Performs a garbage collection\ngc <num bytes to free>\n")
+CLI_FUNC("gc_quick", cli_spiffs_gc_quick, "Performs a quick garbage collection\n")
+#endif
 CLI_FUNC("vis", cli_spiffs_vis, "Debug dump FS\n")
 CLI_FUNC("dbg", cli_spiffs_dbg, "Enable disable fs debug\n"
     "dbg <all | sys | cache | gc | check>\n")
+CLI_FUNC("graph", cli_spiffs_graph, "Enable graphs of stack usage for spiffs cli commands\n"
+    "graph on|off\n")
 CLI_MENU_END
 
 CLI_MENU_START_MAIN

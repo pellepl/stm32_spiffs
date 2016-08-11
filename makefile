@@ -48,6 +48,7 @@ INC =
 SFILES =
 CFILES =
 RFILES =
+SPIFFS_FLAGS ?= 
 
 #############
 #
@@ -72,14 +73,20 @@ MKDIR = mkdir -p
 #
 ###############
 
+COMPILER_OPTIMIZE_FLAGS = -Os
 LD_SCRIPT = arm.ld
 INCLUDE_DIRECTIVES =
 COMPILEROPTIONS = $(INCLUDE_DIRECTIVES) $(FLAGS) -mcpu=cortex-m3 -mno-thumb-interwork -mthumb -Wall -gdwarf-2 -Wno-packed-bitfield-compat -ffunction-sections -fdata-sections
-COMPILEROPTIONS += -Os -nostartfiles -nostdlib 
+COMPILEROPTIONS += $(COMPILER_OPTIMIZE_FLAGS) -nostartfiles -nostdlib 
 #COMPILEROPTIONS += -mno-unaligned-access
 ASSEMBLEROPTION = $(COMPILEROPTIONS)
 LINKERSCRIPT = $(LD_SCRIPT)
+
+GC_SECTION ?= 1
+ifeq (1, $(strip $(GC_SECTION)))
 LINKEROPTIONS = --gc-sections -cref
+endif
+
 OBJCOPYOPTIONS_HEX = -O ihex ${builddir}/$(BINARY).elf
 OBJCOPYOPTIONS_BIN = -O binary ${builddir}/$(BINARY).elf
 
@@ -110,7 +117,7 @@ include ${spiffs}/files.mk
 CFILES 		+= main.c
 CFILES 		+= processor.c
 CFILES 		+= timer.c
-
+CFILES		+= precise_clock.c
 CFILES		+= app.c
 
 # stm32 lib files
@@ -179,7 +186,9 @@ ALLOBJFILES  = $(SOBJFILES)
 ALLOBJFILES += $(OBJFILES)
 ALLOBJFILES += $(ROBJFILES)
 
-DEPENDENCIES = $(DEPFILES) 
+DEPENDENCIES = $(DEPFILES)
+
+FLAGS += $(SPIFFS_FLAGS) 
 
 # link object files, create binary for flashing
 $(BINARY): ${hfile} $(ALLOBJFILES)
@@ -276,6 +285,43 @@ build-info:
 	@echo "${SFILES}"
 	@echo "*** FLAGS"
 	@echo "${FLAGS}"
+	
+ONOFF = 1 0
+OFFON = 0 1
+flash-sizes:
+	@${CC} --version | head -n 1
+	@echo Optimizer flags: $(COMPILER_OPTIMIZE_FLAGS)
+	@echo
+	@echo "|READ_ONLY|SINGLETON|CACHE|IX_MAP|TEMPORAL_FD_CACHE|MAGIC| Binary size |"
+	@echo "|---------|---------|-----|------|-----------------|-----|-------------|"
+	@for rdonly in $(ONOFF); do \
+	for singleton in $(ONOFF); do \
+	for cache in $(OFFON); do \
+	for ix_map in $(OFFON); do \
+	for temporal_cache in $(OFFON); do \
+	for magic in $(OFFON); do \
+	\
+        $(MAKE) clean > /dev/null; \
+		$(MAKE) -s GC_SECTION=0 SPIFFS_FLAGS="\
+            -DSPIFFS_SINGLETON=$$singleton \
+            -DSPIFFS_CACHE=$$cache \
+            -DSPIFFS_CACHE_WR=$$cache \
+            -DSPIFFS_READ_ONLY=$$rdonly \
+            -DSPIFFS_USE_MAGIC=$$magic \
+            -DSPIFFS_USE_MAGIC_LENGTH=$$magic \
+            -DSPIFFS_TEMPORAL_FD_CACHE=$$temporal_cache \
+            -DSPIFFS_IX_MAP=$$ix_map \
+            " > /dev/null; \
+        spiffsize=`python elfspy.py ${builddir}/${BINARY}.elf -r FLASH -p /src/spiffs | tail -n 1 | sed 's/FLASH[ ]*[0-9,a-f,A-F]*[\\.]*[0-9,a-f,A-F]*[ ]*[0-9]*[ ]*\([0-9]*\).*/\1/'`; \
+		echo "|$$rdonly|$$singleton|$$cache|$$ix_map|$$temporal_cache|$$magic|$$spiffsize|"; \
+		\
+		done || exit 1; \
+        done \
+        done \
+        done \
+        done \
+        done
+	
 	
 	
 ############

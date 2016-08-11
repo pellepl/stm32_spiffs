@@ -107,6 +107,10 @@ static void NVIC_config(void)
 #ifdef CONFIG_OS
   NVIC_SetPriority(SysTick_IRQn, NVIC_EncodePriority(prioGrp, 1, 6));
 #endif
+
+  // CPU clock cycle timer irq
+  NVIC_SetPriority(TIM5_IRQn, NVIC_EncodePriority(prioGrp, 0, 2));
+  NVIC_EnableIRQ(TIM5_IRQn);
 }
 
 static void UART1_config() {
